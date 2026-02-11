@@ -1,42 +1,157 @@
-# FILE: /EmpStudyProject/EmpStudyProject/MethodCode/PELTtrendARp.R
-# This file contains the implementation of the PELT (Pruned Exact Linear Time) algorithm for detecting change points in time series data.
 
-PELT.trendARp <- function(Y, p, pen, minseglen) {
-  # Implementation of the PELT algorithm for detecting change points
-  # Y: time series data
-  # p: order of the autoregressive model
-  # pen: penalty term for the number of change points
-  # minseglen: minimum segment length
+PELT.trendARp=function(data,p=1, q=0,pen=0,minseglen=1,verbose=FALSE){
+  # data is a n length vector
+  # pen is a positive value for the penalty
+  trendARpsegfit=function(data,start,p,q){
+    # assumes that data is the data for the segment
+    n=length(data)
+    X=start:(start+n-1)
+    trendfit=lm(data~X)
+    arfit=arima(resid(trendfit),order=c(p,0,q),include.mean=FALSE, method="ML")
+    return(-2*logLik(arfit))
+  }
   
-  n <- length(Y)
-  cost <- numeric(n + 1)
-  change_points <- list()
+  n=length(data)
   
-  # Initialize cost for the first segment
-  cost[1] <- 0
+  lastchangecpts=rep(0,n+1)
+  lastchangelike=-pen
+  checklist=NULL
+  for(i in minseglen:(2*minseglen-1)){
+    lastchangelike[i+1]=trendARpsegfit(data[1:i], start=0,p=p,q=q)
+    lastchangecpts[i+1]=0
+  }
+  checklist=c(0,minseglen)
+  for(tstar in (2*minseglen):n){
+    tmplike=unlist(lapply(checklist,FUN=function(tmpt){return(lastchangelike[tmpt+1]+trendARpsegfit(data[(tmpt+1):tstar], start=tmpt,p=p,q=q)+pen)}))
+    lastchangelike[tstar+1]=min(tmplike,na.rm=TRUE)
+    lastchangecpts[tstar+1]=checklist[which.min(tmplike)[1]]
+    checklist=checklist[tmplike<=(lastchangelike[tstar+1]+pen)]
+    checklist=c(checklist,tstar-minseglen+1)
+    if(verbose){if(tstar%%10==0){print(paste("Finished",tstar))}}
+  }
+  fcpt=NULL
+  last=n
+  while(last!=0){
+    fcpt=c(fcpt,lastchangecpts[last+1])
+    last=lastchangecpts[last+1]
+  }
+  return(sort(fcpt)[-1])
+}
+
+
+
+
+fit.trendARp = function(data, cpts, p=1, q=0, dates=NULL, plot=T, fit=T, add.ar=F, title="Data") {
+  library(forecast)
   
-  for (t in 2:(n + 1)) {
-    cost[t] <- Inf
-    for (s in max(1, t - minseglen): (t - 1)) {
-      segment <- Y[s:(t - 1)]
-      segment_fit <- trendARpsegfit_arimax(segment, p)
-      segment_cost <- sum((segment - segment_fit$trend_fit)^2) + pen
-      if (cost[s] + segment_cost < cost[t]) {
-        cost[t] <- cost[s] + segment_cost
-        change_points[[t]] <- s - 1
-      }
+  trendARpsegfit = function(data, start, p, q) {
+    n = length(data)
+    X = start:(start + n - 1)
+    trendfit = lm(data ~ X)
+    arfit = arima(resid(trendfit), order=c(p,0,q), include.mean=FALSE, method="ML")
+    return(list(
+      coef     = c(coef(trendfit), coef(arfit)),
+      arfit    = fitted(arfit),       # AR fitted values (on residuals)
+      trendfit = fitted(trendfit)     # trend fitted values
+    ))
+  }
+  
+  cpts = c(0, cpts, length(data))
+  segments = list()
+  coeffs = matrix(NA, nrow=length(cpts)-1, ncol=p+2+q)
+  
+  for (i in 1:(length(cpts)-1)) {
+    segments[[i]] = trendARpsegfit(data[(cpts[i]+1):cpts[i+1]], start=cpts[i], p=p, q=q)
+    coeffs[i,] = segments[[i]]$coef
+  }
+  
+  # ---- Combine fitted values across segments ----
+  fit_trend = unlist(lapply(segments, function(x) x$trendfit))
+  fit_ar    = unlist(lapply(segments, function(x) x$arfit))    # AR residual fit
+  fit_total = fit_trend + fit_ar                                # trend + AR combined
+
+  # ---- Plot ----
+  if (plot) {
+    if (!is.null(dates)) {
+      if (length(dates) != length(data)) stop("Length of dates and data must be the same")
+      plot(dates, data, type="l", main=title, xlab="Year", ylab="Anomaly (°C)")
+      lines(dates, fit_trend, col="blue",  lwd=2)
+      lines(dates, fit_total, col="green", lwd=2, lty=2)   # optional: total fit
+      abline(v=dates[cpts[-c(1, length(cpts))]], col="red", lty=2)
+    } else {
+      plot(data, type="l", main=title)
+      lines(fit_trend, col="blue",  lwd=2)
+      lines(fit_total, col="green", lwd=2, lty=2)
+      abline(v=cpts[-c(1, length(cpts))], col="red", lty=2)
     }
   }
   
-  # Extract change points
-  cp <- unlist(change_points)
-  return(cp)
+  # ---- Single clean return ----
+  return(list(
+    dates     = dates,
+    fit_trend = fit_trend,   # trend component only
+    fit_ar    = fit_ar,      # AR component (on residuals)
+    fit_total = fit_total,   # trend + AR
+    coeffs    = coeffs
+  ))
 }
 
-trendARpsegfit_arimax <- function(y, p) {
-  # Fit an ARIMA model to the segment
-  fit <- arima(y, order = c(p, 0, 0), include.mean = TRUE)
-  trend_fit <- fitted(fit)
+# Now for a given output from the above (set of changepoints) we want to get
+# the final fit for each segment and a plot
+fit.trendARpold=function(data,cpts,p=1, q=0, dates=NULL,plot=T,fit=T,add.ar=F,title="Data"){
+  library(forecast)
+  trendARpsegfit=function(data,start,p,q){
+    # assumes that data is the data for the segment
+    n=length(data)
+    X=start:(start+n-1)
+    trendfit=lm(data~X)
+    arfit=arima(resid(trendfit),order=c(p,0,q),include.mean=FALSE, method="ML")
+    return(list(coef=c(coef(trendfit),coef(arfit)),arfit=fitted(arfit),trendfit=fitted(trendfit)))
+  }
   
-  return(list(trend_fit = trend_fit))
+  cpts=c(0,cpts,length(data))
+  segments=list()
+  coeffs=matrix(NA,nrow=length(cpts)-1,ncol=p+2 + q)
+  arfit=list()
+
+  for(i in 1:(length(cpts)-1)){
+    segments[[i]]=trendARpsegfit(data[(cpts[i]+1):cpts[i+1]],start=cpts[i],p=p, q=q)
+    coeffs[i,]=segments[[i]]$coef
+    #arfit[i,]=segments[[i]]$arfit
+  }
+# ---- Combine fitted trend only ----
+fit_trend <- unlist(lapply(segments, function(x) x$trendfit))
+
+  # ---- Plot the trend ----
+  if (plot) {
+    if (!is.null(dates)) {
+      if (length(dates) != length(data)) stop("Length of dates and data must be the same")
+      plot(dates, data, type="l", main=title, xlab="Year", ylab="Anomaly (°C)")
+      lines(dates, fit_trend, col="blue", lwd=2)
+      abline(v = dates[cpts[-c(1, length(cpts))]], col="red", lty=2)  # mark breakpoints
+    } else {
+      plot(data, type="l", main=title)
+      lines(fit_trend, col="blue", lwd=2)
+      abline(v = cpts[-c(1, length(cpts))], col="red", lty=2)
+    }
+  }
+
+# ---- Return ----
+return(list(dates = dates,
+            fit_trend = fit_trend,
+            coeffs = coeffs))
+
+  # ✅ Now return AFTER plotting
+  if(fit){
+    return(list(dates=dates, fit=fit_vals, coeffs=coeffs))
+  } else {
+    return(coeffs)
+  }
+  
+  return(coeffs)
 }
+
+
+
+
+
