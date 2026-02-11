@@ -1,0 +1,3 @@
+# This file contains raw temperature anomaly data used in the analysis. 
+# The actual data should be loaded into this file in RData format. 
+# Please ensure to save the data in the appropriate format using R before using it in the project.
