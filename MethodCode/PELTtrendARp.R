@@ -1,13 +1,13 @@
 
-PELT.trendARp=function(data,p=1, q=0,pen=0,minseglen=1,verbose=FALSE){
+PELT.trendARp=function(data,p=1, pen=0,minseglen=1,verbose=FALSE){
   # data is a n length vector
   # pen is a positive value for the penalty
-  trendARpsegfit=function(data,start,p,q){
+  trendARpsegfit=function(data,start,p){
     # assumes that data is the data for the segment
     n=length(data)
     X=start:(start+n-1)
     trendfit=lm(data~X)
-    arfit=arima(resid(trendfit),order=c(p,0,q),include.mean=FALSE, method="ML")
+    arfit=arima(resid(trendfit),order=c(p,0,0),include.mean=FALSE, method="ML")
     return(-2*logLik(arfit))
   }
   
@@ -17,12 +17,12 @@ PELT.trendARp=function(data,p=1, q=0,pen=0,minseglen=1,verbose=FALSE){
   lastchangelike=-pen
   checklist=NULL
   for(i in minseglen:(2*minseglen-1)){
-    lastchangelike[i+1]=trendARpsegfit(data[1:i], start=0,p=p,q=q)
+    lastchangelike[i+1]=trendARpsegfit(data[1:i], start=0,p=p)
     lastchangecpts[i+1]=0
   }
   checklist=c(0,minseglen)
   for(tstar in (2*minseglen):n){
-    tmplike=unlist(lapply(checklist,FUN=function(tmpt){return(lastchangelike[tmpt+1]+trendARpsegfit(data[(tmpt+1):tstar], start=tmpt,p=p,q=q)+pen)}))
+    tmplike=unlist(lapply(checklist,FUN=function(tmpt){return(lastchangelike[tmpt+1]+trendARpsegfit(data[(tmpt+1):tstar], start=tmpt,p=p)+pen)}))
     lastchangelike[tstar+1]=min(tmplike,na.rm=TRUE)
     lastchangecpts[tstar+1]=checklist[which.min(tmplike)[1]]
     checklist=checklist[tmplike<=(lastchangelike[tstar+1]+pen)]
@@ -41,14 +41,14 @@ PELT.trendARp=function(data,p=1, q=0,pen=0,minseglen=1,verbose=FALSE){
 
 
 
-fit.trendARp = function(data, cpts, p=1, q=0, dates=NULL, plot=T, fit=T, add.ar=F, title="Data") {
+fit.trendARp = function(data, cpts, p=1, dates=NULL, plot=T, fit=T, add.ar=F, title="Data") {
   library(forecast)
   
-  trendARpsegfit = function(data, start, p, q) {
+  trendARpsegfit = function(data, start, p) {
     n = length(data)
     X = start:(start + n - 1)
     trendfit = lm(data ~ X)
-    arfit = arima(resid(trendfit), order=c(p,0,q), include.mean=FALSE, method="ML")
+    arfit = arima(resid(trendfit), order=c(p,0,0), include.mean=FALSE, method="ML")
     return(list(
       coef     = c(coef(trendfit), coef(arfit)),
       arfit    = fitted(arfit),       # AR fitted values (on residuals)
@@ -58,10 +58,10 @@ fit.trendARp = function(data, cpts, p=1, q=0, dates=NULL, plot=T, fit=T, add.ar=
   
   cpts = c(0, cpts, length(data))
   segments = list()
-  coeffs = matrix(NA, nrow=length(cpts)-1, ncol=p+2+q)
+  coeffs = matrix(NA, nrow=length(cpts)-1, ncol=p+2)
   
   for (i in 1:(length(cpts)-1)) {
-    segments[[i]] = trendARpsegfit(data[(cpts[i]+1):cpts[i+1]], start=cpts[i], p=p, q=q)
+    segments[[i]] = trendARpsegfit(data[(cpts[i]+1):cpts[i+1]], start=cpts[i], p=p)
     coeffs[i,] = segments[[i]]$coef
   }
   
@@ -98,24 +98,24 @@ fit.trendARp = function(data, cpts, p=1, q=0, dates=NULL, plot=T, fit=T, add.ar=
 
 # Now for a given output from the above (set of changepoints) we want to get
 # the final fit for each segment and a plot
-fit.trendARpold=function(data,cpts,p=1, q=0, dates=NULL,plot=T,fit=T,add.ar=F,title="Data"){
+fit.trendARpold=function(data,cpts,p=1, dates=NULL,plot=T,fit=T,add.ar=F,title="Data"){
   library(forecast)
-  trendARpsegfit=function(data,start,p,q){
+  trendARpsegfit=function(data,start,p){
     # assumes that data is the data for the segment
     n=length(data)
     X=start:(start+n-1)
     trendfit=lm(data~X)
-    arfit=arima(resid(trendfit),order=c(p,0,q),include.mean=FALSE, method="ML")
+    arfit=arima(resid(trendfit),order=c(p,0,0),include.mean=FALSE, method="ML")
     return(list(coef=c(coef(trendfit),coef(arfit)),arfit=fitted(arfit),trendfit=fitted(trendfit)))
   }
   
   cpts=c(0,cpts,length(data))
   segments=list()
-  coeffs=matrix(NA,nrow=length(cpts)-1,ncol=p+2 + q)
+  coeffs=matrix(NA,nrow=length(cpts)-1,ncol=p+2)
   arfit=list()
 
   for(i in 1:(length(cpts)-1)){
-    segments[[i]]=trendARpsegfit(data[(cpts[i]+1):cpts[i+1]],start=cpts[i],p=p, q=q)
+    segments[[i]]=trendARpsegfit(data[(cpts[i]+1):cpts[i+1]],start=cpts[i],p=p)
     coeffs[i,]=segments[[i]]$coef
     #arfit[i,]=segments[[i]]$arfit
   }
