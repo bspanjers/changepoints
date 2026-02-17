@@ -1,8 +1,10 @@
 library(strucchange)
 library(zoo)
 source('./MethodCode/PELTtrendARp.R')
-
-library(WeightedPortTest) # for the portmanteau test
+library(WeightedPortTest)
+library(parallel)
+library(foreach)
+library(doParallel)
 
 robust_change_point_detection <- function(Y, X=NULL, p=1, block_size=5, alpha = 0.05, candidate_method = "WBS", 
                                          p_n = NULL, eta_n = 30, kernel_type = "sign") {
@@ -274,6 +276,7 @@ compute_test_statistics <- function(candidate_cps, Y, X,
   T_stats
 }
 
+
 #' Compute U-statistic for linear trend change-point
 compute_U_statistic_linear_trend <- function(segment1, segment2, kernel_type = "moment") {
   U_stat <- colMeans(segment1, na.rm = TRUE) - colMeans(segment2, na.rm = TRUE)
@@ -343,7 +346,6 @@ trendARpsegfit_arimax <- function(y, X, p = p) {
 
 #' Generate candidate change-points using PELT
 generate_candidate_change_points <- function(Y, X, p=p, method = "WBS", p_n, eta_n) {
-  n <- nrow(data)
     if (method == "PELT") {
       candidates = PELT.trendARp(Y, p=p, pen=0, minseglen=eta_n)
       if (length(candidates) > p_n) {
@@ -530,346 +532,313 @@ dist_cp_mat <- function(T_hat, T_star) {
   mean(apply(D, 2, min))
 }
 
-refine<-function(th_L,Location_e){
-###### output: refined MOPS change-point Location and informative points #######        
-        Location_p<-numeric()
-        for(i in 1:length(Location_e)){
-        dista=abs(setdiff(th_L,Location_p)-(Location_e)[i])
-        d_min=min(dista)             
-        Location_p[length(Location_p)+1]=setdiff(th_L,Location_p)[which.min(dista)]            
-              } 
-        infor_tau<-sapply(1:K, function(t){
-                        infor <- Location_p[which.min(abs(Location_p-tau_star[t]))]
-                        return(infor)                          
-                         }              
-                  )
-        Re<-list(Location_p=Location_p,infor_tau=infor_tau)          
-        return(Re)         
-      }
+
+# ---- Fixed refine function (pass K and tau_star as arguments) ----
+refine <- function(th_L, Location_e, K, tau_star) {
+  Location_p <- numeric()
   
-
-
-meas_index<-function(Location,infor_tau,tau){
-##### output: FDR,TPR,Pa,estimate number,dist ##########
-        numb_dif<-length(Location)
-        trueD<-intersect(Location,infor_tau)                        
-        fdr<-(numb_dif-length(trueD))/max(numb_dif,1)
-        tdr<-length(trueD)/K
-        Pa<-ifelse(tdr==1,1,0)  
-        if(length(Location)>0)             
-         {temp_dist<-sapply(1:K, function(t){
-                          min(abs(Location-tau[t])) 
-                          }
-                   )
-          dist<-mean(temp_dist)
-         } else {dist<-Inf}
-        return(c(fdr,tdr,Pa,numb_dif,dist))
-}
-
-
-
-
-# load raw monthly data
-#file_raw_monthly = 'ObservedData.csv'
-#df_raw_monthly = read.csv(file_raw_monthly)#load(file)
-#df_raw_monthly = df_raw_monthly#[241:length(df_raw_monthly$t),]
-#Y_raw_monthly = df_raw_monthly$NOAA
-#dates_raw_monthly = df_raw_monthly$t
-
-# load adjusted data
-#file_adj_monthly = 'temperature_anomalies_adj_monthly.RData'
-#load(file_adj_monthly)
-#df_adj_monthly <- subset(Tanom_annual_df, time >= 1880)
-#names(df_adj_monthly)[1] <- "t"
-#Y_adj_monthly <- df_adj_monthly$Berk.adj
-#dates_adj = df_adj_monthly$t
-
-
-# load adj yearly data
-file_adj_yearly = './data/temperature_anomalies_adj.RData'
-load(file_adj_yearly)
-df_adj_yearly <- subset(Tanom_annual_df, Year >= 1880)
-names(df_adj_yearly)[1] <- "t"
-Y_adj_yearly <- df_adj_yearly$NOAA.adj
-dates_adj_yearly = df_adj_yearly$t
-
-# For adj: NASA / NOAA blocksize=3, Berk/HadCRU blocksize=2
-
-
-# load raw yearly data
-file_raw_yearly = './data/temperature_anomalies.RData'
-load(file_raw_yearly)
-df_raw_yearly <- subset(Tanom_annual_df, year >= 1880)
-names(df_raw_yearly)[1] <- "t"
-Y_raw_yearly <- df_raw_yearly$HadCRU
-dates_raw_yearly = df_raw_yearly$t
-
-# For raw: HadCRU/NOAA/NASA blocksize=2, Berk blocksize=4
-
-Y = Y_raw_yearly### Y_adj or Y_raw
-
-dates = dates_raw_yearly ### fix at dates_raw
-if (length(dates) %% 2 == 1) {
-  dates <- dates[-length(dates)]
-}
-if (length(Y) %% 2 == 1) {
-  Y <- Y[-length(Y)]
-}
-n <- length(Y)
-X <- cbind(
-  Intercept = rep(1, length(Y)),
-    X_year = (1:length(Y)) / 12
-)
-eta_n <- 5#min(60, floor(n^(1/2)))
-p <- 1
-# Compare with moment kernel
-result_moment <- robust_change_point_detection(
-  Y,
-  X, 
-  p=p,
-  block_size = 3,
-  alpha = .5, 
-  candidate_method = "PELT",
-  kernel_type = "moment", eta_n=eta_n,
-)
-Location_e <- result_moment$change_points # detected change-points from moment kernel T
-fittrend_e = fit.trendARp(Y,Location_e,p=p,plot=T,add.ar=F,fit=T,
-                            dates=dates)#
-K <- length(Location_e)
-candidate_cps_refined <- generate_candidate_change_points(Y, X, p=p,method = "PELT", 
-                                                   p_n = floor(2 * n^(2/5)), eta_n = eta_n) # A(Z)
-
-
-R_MOPS <- refine(candidate_cps_refined, Location_e)
-Location_p <- R_MOPS$Location_p #Refined MOPS change-point Location T(Z)
-
-fittrend_p = fit.trendARp(Y, Location_p, p=p,plot=T,add.ar=F,fit=T,
-                            dates=dates)#
-LAG=20
-resid <- Y - fittrend_p$fit_total
-Weighted.Box.test(resid,lag=LAG,type="Ljung",fitdf=1)$p.value
-
-
-
-# =========================
-# Full code (single chunk)
-# =========================
-
-library(ggplot2)
-library(gridExtra)
-
-# -------------------------
-# Model lists
-# -------------------------
-raw_models <- list(
-  NASA     = df_raw_yearly$NASA,
-  NOAA     = df_raw_yearly$NOAA,
-  HadCRU   = df_raw_yearly$HadCRUT,   # raw column name in your data
-  Berkeley = df_raw_yearly$Berkeley
-)
-
-adj_models <- list(
-  NASA     = df_adj_yearly$NASA.adj,
-  NOAA     = df_adj_yearly$NOAA.adj,
-  HadCRU   = df_adj_yearly$HadCRU.adj,
-  Berkeley = df_adj_yearly$Berk.adj
-)
-
-# -------------------------
-# Helpers
-# -------------------------
-trim_even <- function(Y, dates) {
-  m <- min(length(Y), length(dates))
-  Y <- Y[1:m]
-  dates <- dates[1:m]
-  if (m %% 2 == 1) {
-    Y <- Y[-m]
-    dates <- dates[-m]
+  if (length(Location_e) == 0) {
+    return(list(Location_p = numeric(), infor_tau = numeric()))
   }
-  list(Y = Y, dates = dates)
-}
-
-sanitize_cps <- function(cps, n) {
-  if (is.null(cps)) return(integer(0))
-  if (is.list(cps)) cps <- unlist(cps, use.names = FALSE)
-  cps <- as.integer(cps)
-  cps <- cps[!is.na(cps)]
-  cps <- cps[cps >= 1 & cps <= n]
-  sort(unique(cps))
-}
-
-format_p <- function(p) {
-  if (is.na(p)) return("NA")
-  if (p < 0.001) return("<0.001")
-  formatC(p, format = "f", digits = 3)
-}
-
-# block sizes you specified
-get_block_size <- function(dataset, model) {
-  if (dataset == "adj") {
-    # For adj: NASA/NOAA blocksize=3/4, Berk/HadCRU blocksize=2
-    if (model %in% c("NASA")) return(4L)
-    if (model %in% c("NOAA")) return(4L)
-    if (model %in% c("HadCRU")) return(4L)
-    if (model %in% c("Berkeley")) return(4L)
+  
+  for (i in 1:length(Location_e)) {
+    remaining <- setdiff(th_L, Location_p)
+    if (length(remaining) == 0) break
+    dista <- abs(remaining - Location_e[i])
+    Location_p[length(Location_p) + 1] <- remaining[which.min(dista)]
   }
-  if (dataset == "raw") {
-    # For raw: HadCRU/NOAA/NASA blocksize=2, Berk blocksize=4
-    if (model %in% c("NASA")) return(4L)
-    if (model %in% c("NOAA")) return(4L)
-    if (model %in% c("HadCRU")) return(4L)
-    if (model %in% c("Berkeley")) return(4L)
-  }
-  stop("Unknown dataset/model: ", dataset, " / ", model)
-}
-
-# -------------------------
-# Core runner for one series
-# -------------------------
-run_one_series <- function(Y, dates, block_size,
-                           eta_n = 9, alpha = 0.5,
-                           candidate_method = "PELT",
-                           kernel_type = "moment",
-                           p = 1,
-                           LAG = 20,
-                           plot_fit = FALSE) {
-
-  te <- trim_even(Y, dates)
-  Y <- te$Y
-  dates <- te$dates
-
-  n <- length(Y)
-  X <- cbind(
-    Intercept = rep(1, n),
-    X_year = (1:n) / 12
-  )
-
-  # Moment kernel change-points
-  result_moment <- robust_change_point_detection(
-    Y, X,
-    p=p,
-    block_size = block_size,
-    alpha = alpha,
-    candidate_method = candidate_method,
-    kernel_type = kernel_type,
-    eta_n = eta_n
-  )
-  Location_e <- sanitize_cps(result_moment$change_points, n)
-
-  # Candidate cps + refine
-  candidate_cps_refined <- generate_candidate_change_points(
-    Y, X,p=p,
-    method = "PELT",
-    p_n = floor(2 * n^(2/5)),
-    eta_n = eta_n
-  )
-
-  R_MOPS <- refine(candidate_cps_refined, Location_e)
-  Location_p <- sanitize_cps(R_MOPS$Location_p, n)
-
-  # Fit trend with refined cps
-  fittrend_p <- fit.trendARp(
-    Y, Location_p,
-    p = p, plot = plot_fit, add.ar = FALSE, fit = TRUE, dates = dates
-  )
-
-  # Ljung-Box p-value on residuals (using your formula)
-  resid <- Y - fittrend_p$fit_total
-  lb_pval <- Weighted.Box.test(resid, lag = LAG, type = "Ljung", fitdf = 1)$p.value
-  resid_finite <- resid[is.finite(resid)]
-  normality_pval <- tryCatch({
-    if (length(resid_finite) < 3 || length(resid_finite) > 5000) {
-      NA_real_
-    } else {
-      shapiro.test(resid_finite)$p.value
-    }
-  }, error = function(e) NA_real_)
-
-  list(
-    Y = Y, dates = dates, X = X,
-    Location_e = Location_e,
-    Location_p = Location_p,
-    fittrend_p = fittrend_p,
-    lb_pval = lb_pval,
-    normality_pval = normality_pval
-  )
-}
-
-# -------------------------
-# Plot builder (raw or adj)
-# -------------------------
-make_cp_plots <- function(dataset = c("raw", "adj"),
-                          df_raw_yearly, df_adj_yearly,
-                          raw_models, adj_models,
-                          eta_n = 9, alpha = 0.5, p = 1, LAG = 20) {
-
-  dataset <- match.arg(dataset)
-
-  if (dataset == "raw") {
-    models <- raw_models
-    dates_all <- df_raw_yearly$t
-  } else {
-    models <- adj_models
-    dates_all <- df_adj_yearly$t
-  }
-
-  plots <- lapply(names(models), function(model) {
-    Y <- models[[model]]
-    bs <- get_block_size(dataset, model)
-
-    res <- run_one_series(
-      Y = Y,
-      dates = dates_all,
-      block_size = bs,
-      eta_n = eta_n,
-      alpha = alpha,
-      p = p,
-      LAG = LAG,
-      plot_fit = FALSE
-    )
-
-    ggplot() +
-      geom_line(aes(x = res$dates, y = res$Y), color = "blue") +
-      geom_line(aes(x = res$dates, y = res$fittrend_p$fit_trend), color = "red") +
-      { if (length(res$Location_p) > 0)
-          geom_vline(xintercept = res$dates[res$Location_p], linetype = "dotted", color = "black")
-        else NULL } +
-      labs(
-        title = paste0(
-          toupper(dataset), " - ", model,
-          " (block=", bs,
-          ", Ljung Box p-value=", format_p(res$lb_pval),
-          ", Shapiro p-value=", format_p(res$normality_pval), ")"
-        ),
-        x = "Year",
-        y = "Temperature Anomaly"
-      ) +
-      theme_minimal()
+  
+  infor_tau <- sapply(1:K, function(t) {
+    if (length(Location_p) == 0) return(NA)
+    Location_p[which.min(abs(Location_p - tau_star[t]))]
   })
-
-  plots
+  
+  list(Location_p = Location_p, infor_tau = infor_tau)
 }
 
-# -------------------------
-# Build + arrange grids
-# -------------------------
-raw_plots <- make_cp_plots(
-  dataset = "raw",
-  df_raw_yearly = df_raw_yearly,
-  df_adj_yearly = df_adj_yearly,
-  raw_models = raw_models,
-  adj_models = adj_models,
-  eta_n = 6, alpha = 0.5, p = 1, LAG = 20
+# ---- Fixed meas_index function (pass K as argument) ----
+meas_index <- function(Location, infor_tau, tau, K) {
+  numb_dif <- length(Location)
+  trueD <- intersect(Location, infor_tau)
+  fdr <- (numb_dif - length(trueD)) / max(numb_dif, 1)
+  tdr <- length(trueD) / K
+  Pa <- ifelse(tdr == 1, 1, 0)
+  
+  if (length(Location) > 0) {
+    temp_dist <- sapply(1:K, function(t) {
+      min(abs(Location - tau[t]))
+    })
+    dist <- mean(temp_dist)
+  } else {
+    dist <- Inf
+  }
+  
+  return(c(fdr, tdr, Pa, numb_dif, dist))
+}
+
+
+# ---- grids you want to sweep ----
+alpha_grid <- c(0.2, .5)
+sigma_grid <- c(.1, 1)
+block_grid <- c(5, 6, 7, 8, 9,10)
+eta_grid <- c(34, 44, 49)
+
+# ---- fixed settings ----
+n <- 2000
+K_n <- 10
+n_sim <- 1000
+AR_phi <- 0.4
+error <- "gaussian"
+tau_manual <- NULL
+
+# "bad" result detector
+is_bad_row <- function(x) {
+  x <- as.numeric(x)
+  any(!is.finite(x)) || all(x == 0) || identical(x, c(0, 0, 0, 0, Inf))
+}
+
+# Single simulation run (self-contained, no global dependencies)
+run_single_sim <- function(sim_id, alpha, sigma, block_size, eta_n, n, K_n, error, AR_phi, tau_manual) {
+  
+  max_attempts <- 50
+  attempt <- 0
+  
+  while (attempt < max_attempts) {
+    attempt <- attempt + 1
+    
+    result <- tryCatch({
+      sim <- simulate_piecewise_linear_discontinuous(
+        n = n, K_n = K_n, error = error, AR_phi = AR_phi, 
+        tau_manual = tau_manual, sigma = sigma
+      )
+      
+      Y <- sim$Y
+      X <- sim$X
+      tau_star <- sim$tau_true
+      K <- length(tau_star)
+      
+      # --- MOPS ---
+      result_moment <- robust_change_point_detection(
+        Y,
+        X = X,
+        block_size = block_size,
+        alpha = alpha,
+        candidate_method = "PELT",
+        kernel_type = "moment",
+        eta_n = eta_n
+      )
+      
+      th_L <- result_moment$candidate_points
+      Location_e <- result_moment$change_points
+      
+      if (length(th_L) == 0) {
+        return(NULL)
+      }
+      
+      infor_tau <- sapply(seq_len(K), function(t) {
+        th_L[which.min(abs(th_L - floor(tau_star[t])))]
+      })
+      
+      # Pass K explicitly to meas_index
+      mops_row <- meas_index(Location_e, infor_tau, tau_star, K)
+      
+      # --- R-MOPS ---
+      candidate_cps_refined <- generate_candidate_change_points(
+        Y, X, method = "PELT", p = 1,
+        p_n = floor(2 * n^(2 / 5)),
+        eta_n = eta_n
+      )
+      
+      # Pass K and tau_star explicitly to refine
+      R_MOPS <- refine(candidate_cps_refined, Location_e, K, tau_star)
+      location_p <- R_MOPS$Location_p
+      R_infor_tau <- R_MOPS$infor_tau
+      
+      # Pass K explicitly to meas_index
+      rmops_row <- meas_index(location_p, R_infor_tau, tau_star, K)
+      
+      if (is_bad_row(mops_row) || is_bad_row(rmops_row)) {
+        NULL
+      } else {
+        list(mops = as.numeric(mops_row), rmops = as.numeric(rmops_row))
+      }
+    }, error = function(e) {
+      # Uncomment for debugging:
+      # cat(sprintf("Error in sim %d: %s\n", sim_id, e$message))
+      NULL
+    })
+    
+    if (!is.null(result)) {
+      return(result)
+    }
+  }
+  
+  # Return NA if all attempts failed
+  return(list(mops = rep(NA_real_, 5), rmops = rep(NA_real_, 5)))
+}
+
+# One setting runner using foreach (more efficient)
+run_one_parallel <- function(alpha, sigma, block_size, eta_n, n_cores = NULL) {
+  
+  if (is.null(n_cores)) {
+    n_cores <- max(1, detectCores() - 2)
+  }
+  
+  cat(sprintf("  Using %d cores for %d simulations\n", n_cores, n_sim))
+  
+  # Register parallel backend
+  cl <- makeCluster(n_cores)
+  registerDoParallel(cl)
+  
+  # Ensure cleanup on exit
+  on.exit({
+    stopCluster(cl)
+    registerDoSEQ()
+  })
+  
+  # Export all required functions to workers
+  clusterExport(cl, c(
+    "simulate_piecewise_linear_discontinuous",
+    "robust_change_point_detection",
+    "generate_candidate_change_points",
+    "compute_test_statistics",
+    "compute_U_statistic_linear_trend",
+    "trendARpsegfit_arimax",
+    "moving_range_Omega_inv",
+    "select_fdr_threshold",
+    "refine",
+    "meas_index",
+    "dist_cp_mat",
+    "is_bad_row",
+    "run_single_sim",
+    "n_sim"
+  ), envir = globalenv())
+  
+  # Export the current function parameters to workers
+  # Use a named list to avoid scoping issues
+  local_params <- list(
+    alpha = alpha,
+    sigma = sigma,
+    block_size = block_size,
+    eta_n = eta_n,
+    n = n,
+    K_n = K_n,
+    error = error,
+    AR_phi = AR_phi,
+    tau_manual = tau_manual
+  )
+  clusterExport(cl, "local_params", envir = environment())
+  
+  # Load packages on workers
+  clusterEvalQ(cl, {
+    library(strucchange)
+    library(zoo)
+    library(WeightedPortTest)
+    source('./MethodCode/PELTtrendARp.R')
+  })
+  
+  # Run using foreach - NO .export needed since we use clusterExport
+  results_list <- foreach(
+    i = 1:n_sim,
+    .errorhandling = "pass"
+  ) %dopar% {
+    run_single_sim(
+      sim_id = i,
+      alpha = local_params$alpha,
+      sigma = local_params$sigma,
+      block_size = local_params$block_size,
+      eta_n = local_params$eta_n,
+      n = local_params$n,
+      K_n = local_params$K_n,
+      error = local_params$error,
+      AR_phi = local_params$AR_phi,
+      tau_manual = local_params$tau_manual
+    )
+  }
+  
+  # Collect results
+  MOPS_results <- matrix(NA_real_, nrow = n_sim, ncol = 5)
+  RMOPS_results <- matrix(NA_real_, nrow = n_sim, ncol = 5)
+  
+  for (i in seq_along(results_list)) {
+    res <- results_list[[i]]
+    if (!is.null(res) && !inherits(res, "error") && 
+        !is.null(res$mops) && !is.null(res$rmops)) {
+      MOPS_results[i, ] <- res$mops
+      RMOPS_results[i, ] <- res$rmops
+    }
+  }
+  
+  # Summarize
+  n_valid <- sum(complete.cases(MOPS_results) & complete.cases(RMOPS_results))
+  summary_MOPS <- colMeans(MOPS_results, na.rm = TRUE)
+  summary_RMOPS <- colMeans(RMOPS_results, na.rm = TRUE)
+  
+  list(
+    params = data.frame(alpha = alpha, sigma = sigma, 
+                        block_size = block_size, eta_n = eta_n),
+    summary_table = rbind(MOPS = summary_MOPS, RMOPS = summary_RMOPS),
+    n_valid = n_valid,
+    attempts = n_sim
+  )
+}
+
+# ---- run all combinations ----
+grid <- expand.grid(
+  alpha = alpha_grid,
+  sigma = sigma_grid,
+  block_size = block_grid,
+  eta_n = eta_grid,
+  KEEP.OUT.ATTRS = FALSE,
+  stringsAsFactors = FALSE
 )
 
-adj_plots <- make_cp_plots(
-  dataset = "adj",
-  df_raw_yearly = df_raw_yearly,
-  df_adj_yearly = df_adj_yearly,
-  raw_models = raw_models,
-  adj_models = adj_models,
-  eta_n = 6, alpha = 0.5, p = 1, LAG = 20
-)
+n_cores <- max(1, detectCores() - 2)
+cat(sprintf("Detected %d cores, using %d for parallel execution\n", detectCores(), n_cores))
 
-gridExtra::grid.arrange(grobs = raw_plots, ncol = 2, top = "Raw Data - Four Models")
-gridExtra::grid.arrange(grobs = adj_plots, ncol = 2, top = "Adjusted Data - Four Models")
+results <- vector("list", nrow(grid))
+
+for (i in seq_len(nrow(grid))) {
+  cat(sprintf("Running %d/%d: alpha=%s sigma=%s block=%s eta_n=%s\n",
+              i, nrow(grid), grid$alpha[i], grid$sigma[i], 
+              grid$block_size[i], grid$eta_n[i]))
+  
+  start_time <- Sys.time()
+  
+  results[[i]] <- run_one_parallel(
+    alpha = grid$alpha[i],
+    sigma = grid$sigma[i],
+    block_size = grid$block_size[i],
+    eta_n = grid$eta_n[i],
+    n_cores = n_cores
+  )
+  
+  elapsed <- difftime(Sys.time(), start_time, units = "mins")
+  cat(sprintf("  Completed in %.2f minutes (n_valid = %d)\n", 
+              elapsed, results[[i]]$n_valid))
+}
+
+# ---- tidy output ----
+out <- do.call(rbind, lapply(seq_along(results), function(i) {
+  res <- results[[i]]
+  if (is.null(res) || is.null(res$summary_table) || 
+      nrow(res$summary_table) == 0) return(NULL)
+  
+  tab <- res$summary_table
+  
+  data.frame(
+    alpha = res$params$alpha,
+    sigma = res$params$sigma,
+    block_size = res$params$block_size,
+    eta_n = res$params$eta_n,
+    method = rownames(tab),
+    n_valid = res$n_valid,
+    attempts = res$attempts,
+    tab,
+    row.names = NULL,
+    check.names = FALSE
+  )
+}))
+
+print(out)
+saveRDS(out, "simulation_results_block_eta_n2000.rds")

@@ -69,9 +69,9 @@ robust_change_point_detection <- function(Y, X=NULL, p=1, block_size=5, alpha = 
 
   
   # Step 2: Compute test statistics T_j
-  #T_stats <- compute_test_statistics_new(candidate_cps, Y, X,O_indices, E_indices, YO_data, YE_data, XO_data, XE_data, kernel_type)
-  T_stats <- compute_test_statistics_old(candidate_cps, Y, X, Y_indices, X_indices, O_indices, E_indices, YO_data, YE_data, XO_data, XE_data, kernel_type, p)
-
+  T_stats <- compute_test_statistics(candidate_cps, Y, X,
+                                    O_indices, E_indices,
+                                    kernel_type, p = 1)
   # Step 3: Select threshold controlling FDR
   threshold_result <- select_fdr_threshold(T_stats, alpha)
   
@@ -93,173 +93,188 @@ robust_change_point_detection <- function(Y, X=NULL, p=1, block_size=5, alpha = 
 
 
 
+compute_test_statistics <- function(candidate_cps, Y, X,
+                                    O_indices, E_indices,
+                                    kernel_type = NULL, p = 1) {
 
-#' Compute test statistics T_j for all candidate change-points
-compute_test_statistics_old <- function(candidate_cps, Y, X, Y_indices, X_indices, O_indices, E_indices, YO_data, YE_data, XO_data, XE_data, kernel_type, p) {
+  # -------- helpers --------
+  safe_beta2 <- function(coefs) {
+    if (is.null(coefs) || length(coefs) < 2) return(c(0, 0))
+    as.numeric(coefs[1:2])
+  }
+  safe_phi1 <- function(coefs, p) {
+    if (p < 1) return(0)
+    if (is.null(coefs) || is.null(names(coefs))) return(0)
+    if (!("ar1" %in% names(coefs))) return(0)
+    as.numeric(coefs["ar1"])
+  }
+
+  # Build AR(1) innovations eps_t and corresponding "whitened" regressors Xtilde_t
+  # for a concatenation of (segment1, segment2), with boundary step using last u1/x1.
+  make_eps_and_Xtilde_ar1 <- function(u1, X1, u2, X2, phi) {
+    n1 <- length(u1); n2 <- length(u2)
+
+    eps1 <- rep(NA_real_, n1)
+    eps2 <- rep(NA_real_, n2)
+
+    Xtilde1 <- matrix(NA_real_, nrow = n1, ncol = ncol(X1))
+    Xtilde2 <- matrix(NA_real_, nrow = n2, ncol = ncol(X2))
+
+    # within seg1: t = 2..n1
+    if (n1 >= 2) {
+      eps1[2:n1] <- u1[2:n1] - phi * u1[1:(n1 - 1)]
+      Xtilde1[2:n1, ] <- X1[2:n1, , drop = FALSE] - phi * X1[1:(n1 - 1), , drop = FALSE]
+    }
+
+    # boundary for first point in seg2 (if exists)
+    if (n2 >= 1 && n1 >= 1) {
+      eps2[1] <- u2[1] - phi * u1[n1]
+      Xtilde2[1, ] <- X2[1, , drop = FALSE] - phi * X1[n1, , drop = FALSE]
+    }
+
+    # within seg2: t = 2..n2
+    if (n2 >= 2) {
+      eps2[2:n2] <- u2[2:n2] - phi * u2[1:(n2 - 1)]
+      Xtilde2[2:n2, ] <- X2[2:n2, , drop = FALSE] - phi * X2[1:(n2 - 1), , drop = FALSE]
+    }
+
+    list(eps1 = eps1, eps2 = eps2, Xtilde1 = Xtilde1, Xtilde2 = Xtilde2)
+  }
+
+  # -------- main loop --------
   p_n <- length(candidate_cps) - 2
-  T_stats <- numeric(p_n)
-  
+  T_stats <- rep(-Inf, p_n)
+
   for (j in 1:p_n) {
-    # Segment boundaries
-    start <- candidate_cps[j] + 1 # +1 because candidate_cps[1] = 0
-    cp <- candidate_cps[j + 1]
-    end <- candidate_cps[j + 2]
-    
-    n_j <- cp - start + 1
+
+    # Segment boundaries in "candidate index space"
+    start <- candidate_cps[j] + 1
+    cp    <- candidate_cps[j + 1]
+    end   <- candidate_cps[j + 2]
+
+    n_j  <- cp - start + 1
     n_j1 <- end - cp
-    
+
     if (n_j < 1 || n_j1 < 1) {
       T_stats[j] <- -Inf
       next
     }
 
+    # Map back to full-data indices (your original mapping)
+    start_full <- 2 * start - 1
+    cp_full    <- 2 * cp
+    end_full   <- 2 * end
 
-    # Map segment indices back to full data
-    start_full <- 2 * start - 1  # because of odd/even split we need to multiply by 2 for detrending the full sample
-    cp_full <- 2 * cp       # we subtract 1 from start as the first index is odd since the breakpoints are defined on odd indices
-    end_full <- 2 * end        # we don't subtract 1 from cp or end as otherwise we never obtain the last index of the full data
-
-    # Full data segment indices
     idx1 <- start_full:cp_full
     idx2 <- (cp_full + 1):end_full
 
-    # Check if indices are in O or E
+    if (length(idx1) < 2 || length(idx2) < 1) {
+      T_stats[j] <- -Inf
+      next
+    }
+
+    # Split masks
     in_O_seg1 <- idx1 %in% O_indices
     in_E_seg1 <- idx1 %in% E_indices
-
     in_O_seg2 <- idx2 %in% O_indices
     in_E_seg2 <- idx2 %in% E_indices
 
-    # Extract segments from full data
-    segment1Y <- Y[idx1, drop = FALSE]
-    segment2Y <- Y[idx2, drop = FALSE]
-
+    # Extract full segments
+    segment1Y <- Y[idx1]
+    segment2Y <- Y[idx2]
     segment1X <- X[idx1, , drop = FALSE]
     segment2X <- X[idx2, , drop = FALSE]
 
-    y1O <- segment1Y[in_O_seg1, drop = FALSE]
-    y2O <- segment2Y[in_O_seg2, drop = FALSE]
+    # Subsamples used to fit parameters (odd/even)
+    y1O <- segment1Y[in_O_seg1]
     X1O <- segment1X[in_O_seg1, , drop = FALSE]
-    X2O <- segment2X[in_O_seg2, , drop = FALSE]
-
-    y1E <- segment1Y[in_E_seg1, drop = FALSE]
-    y2E <- segment2Y[in_E_seg2, drop = FALSE]
+    y1E <- segment1Y[in_E_seg1]
     X1E <- segment1X[in_E_seg1, , drop = FALSE]
-    X2E <- segment2X[in_E_seg2, , drop = FALSE]
 
-    # Fit trends on odd and even segments 
-    result2O = trendARpsegfit_arimax(y1O, X1O, p=p)
-    beta1_hatO <- as.numeric(result2O$coef[1:2])
-    phiO <- as.numeric(result2O$coef["ar1"])
-    #print(result2O$coef)
-
-    result2E = trendARpsegfit_arimax(y1E, X1E, p=p)
-    beta1_hatE <- as.numeric(result2E$coef[1:2])
-    phiE <- as.numeric(result2E$coef["ar1"])
-    #print(result2E$coef)
-
-
-    # ---------- O segment ----------
-    result2O <- trendARpsegfit_arimax(y1O, X1O, p = p)
-    coefO <- result2O$coef
-
-    # Safe beta extraction (first two coefficients if they exist)
-    beta1_hatO <- if (length(coefO) >= 2) {
-      as.numeric(coefO[1:2])
-    } else {
-      c(0, 0)
+    # Need enough points to fit; if not, skip
+    if (length(y1O) < 2 || length(y1E) < 2) {
+      T_stats[j] <- -Inf
+      next
     }
 
-    # Safe AR(1) extraction
-    phiO <- if ("ar1" %in% names(coefO)) {
-      as.numeric(coefO["ar1"])
-    } else {
-      0
+    # Fit on O and E (once each)
+    fitO  <- trendARpsegfit_arimax(y1O, X1O, p = p)
+    fitE  <- trendARpsegfit_arimax(y1E, X1E, p = p)
+    coefO <- fitO$coef
+    coefE <- fitE$coef
+
+    beta_hatO <- safe_beta2(coefO)
+    beta_hatE <- safe_beta2(coefE)
+    phiO      <- safe_phi1(coefO, p)
+    phiE      <- safe_phi1(coefE, p)
+
+    # Residuals for FULL segments using SAME beta (as you intended)
+    u1O_full <- as.numeric(segment1Y - segment1X %*% beta_hatO)
+    u2O_full <- as.numeric(segment2Y - segment2X %*% beta_hatO)
+
+    u1E_full <- as.numeric(segment1Y - segment1X %*% beta_hatE)
+    u2E_full <- as.numeric(segment2Y - segment2X %*% beta_hatE)
+
+    # Build innovations + whitened regressors for O and E
+    wO <- make_eps_and_Xtilde_ar1(u1O_full, segment1X, u2O_full, segment2X, phiO)
+    wE <- make_eps_and_Xtilde_ar1(u1E_full, segment1X, u2E_full, segment2X, phiE)
+
+    # Now restrict to O/E indices AND drop NA rows (first obs of seg1 is NA)
+    # Segment 1
+    keep1O <- in_O_seg1 & !is.na(wO$eps1)
+    keep1E <- in_E_seg1 & !is.na(wE$eps1)
+    # Segment 2
+    keep2O <- in_O_seg2 & !is.na(wO$eps2)
+    keep2E <- in_E_seg2 & !is.na(wE$eps2)
+
+    eps1O <- wO$eps1[keep1O]
+    eps2O <- wO$eps2[keep2O]
+    X1O_t <- wO$Xtilde1[keep1O, , drop = FALSE]
+    X2O_t <- wO$Xtilde2[keep2O, , drop = FALSE]
+
+    eps1E <- wE$eps1[keep1E]
+    eps2E <- wE$eps2[keep2E]
+    X1E_t <- wE$Xtilde1[keep1E, , drop = FALSE]
+    X2E_t <- wE$Xtilde2[keep2E, , drop = FALSE]
+
+    # Need non-empty for U-statistic
+    if (length(eps1O) < 1 || length(eps2O) < 1 || length(eps1E) < 1 || length(eps2E) < 1) {
+      T_stats[j] <- -Inf
+      next
     }
 
+    # Scores: s_t = Xtilde_t * eps_t  (no sigma scaling)
+    S1O <- X1O_t * as.numeric(eps1O)
+    S2O <- X2O_t * as.numeric(eps2O)
 
-    # ---------- E segment ----------
-    result2E <- trendARpsegfit_arimax(y1E, X1E, p = p)
-    coefE <- result2E$coef
-
-    beta1_hatE <- if (length(coefE) >= 2) {
-      as.numeric(coefE[1:2])
-    } else {
-      c(0, 0)
-    }
-
-    phiE <- if ("ar1" %in% names(coefE)) {
-      as.numeric(coefE["ar1"])
-    } else {
-      0
-    }
-
-    # obtain detrended residuals using SAME beta1_hatO
-    residuals1star_betaO <- segment1Y - segment1X %*% beta1_hatO
-    residuals2star_betaO <- segment2Y - segment2X %*% beta1_hatO
-
-    residuals1star_betaE <- segment1Y - segment1X %*% beta1_hatE
-    residuals2star_betaE <- segment2Y - segment2X %*% beta1_hatE
-
-    u1O <- as.numeric(residuals1star_betaO)  
-    u2O <- as.numeric(residuals2star_betaO)
-    u1E <- as.numeric(residuals1star_betaE)  
-    u2E <- as.numeric(residuals2star_betaE)
-
-    residuals1star_betaO_white <- numeric(length(u1O))
-    residuals2star_betaO_white <- numeric(length(u2O))
-
-    residuals1star_betaE_white <- numeric(length(u1E))
-    residuals2star_betaE_white <- numeric(length(u2E))
-    
-    residuals1star_betaO_white[-1] <- u1O[-1] - phiO * u1O[-length(u1O)]       # within seg1
-    residuals2star_betaO_white[1] <- u2O[1] - phiO * u1O[length(u1O)]          # boundary step
-    residuals2star_betaO_white[-1] <- u2O[-1] - phiO * u2O[-length(u2O)]       # within seg2
-
-    residuals1star_betaE_white[-1] <- u1E[-1] - phiE * u1E[-length(u1E)]       # within seg1
-    residuals2star_betaE_white[1] <- u2E[1] - phiE * u1E[length(u1E)]          # boundary step
-    residuals2star_betaE_white[-1] <- u2E[-1] - phiE * u2E[-length(u2E)]       # within seg2
-
-    residuals1_O = residuals1star_betaO_white[in_O_seg1, drop = FALSE]
-    residuals1_E = residuals1star_betaE_white[in_E_seg1, drop = FALSE]
-
-    residuals2_O = residuals2star_betaO_white[in_O_seg2, drop = FALSE]
-    residuals2_E = residuals2star_betaE_white[in_E_seg2, drop = FALSE]
-
-    # scores (up to sign; consistent across segments)
-    S1O <- X1O * as.numeric(residuals1_O)                    # (n1-1) x d
-    S2O <- X2O * as.numeric(residuals2_O)                    # (n2-1) x d
-
-    S1E <- X1E * as.numeric(residuals1_E)                    # (n1-1) x d
-    S2E <- X2E * as.numeric(residuals2_E)                    # (n2-1) x d
+    S1E <- X1E_t * as.numeric(eps1E)
+    S2E <- X2E_t * as.numeric(eps2E)
 
     # Compute L_j^E and L_j^O
-    result_E <- compute_U_statistic_linear_trend_old(S1E, S2E)
-    result_O <- compute_U_statistic_linear_trend_old(S1O, S2O)
-    
+    result_E <- compute_U_statistic_linear_trend(S1E, S2E)
+    result_O <- compute_U_statistic_linear_trend(S1O, S2O)
+
     L_j_E <- result_E$U_stat
     L_j_O <- result_O$U_stat
-    S1 <- result_O$S1
-    S2 <- result_O$S2 
+    S1    <- result_O$S1
+    S2    <- result_O$S2
 
-    # Estimate covariance matrix
+    # Covariance estimate
     Sigma_hat <- moving_range_Omega_inv(S1, S2)
 
-    # Compute test statistic
     if (rcond(Sigma_hat) < 1e-10) {
-      # Add regularization if matrix is near singular
-      Sigma_hat <- Sigma_hat + diag(ncol(XO_data)) * 1e-6
+      Sigma_hat <- Sigma_hat + diag(ncol(X)) * 1e-6
     }
 
     scale_factor <- (n_j * n_j1) / (n_j + n_j1)
-    T_stats[j] <- scale_factor * t(L_j_O) %*% solve(Sigma_hat) %*% L_j_E
+    T_stats[j] <- as.numeric(scale_factor * t(L_j_O) %*% solve(Sigma_hat) %*% L_j_E)
   }
-  
-  return(T_stats)
+
+  T_stats
 }
 
 #' Compute U-statistic for linear trend change-point
-compute_U_statistic_linear_trend_old <- function(segment1, segment2, kernel_type = "moment") {
+compute_U_statistic_linear_trend <- function(segment1, segment2, kernel_type = "moment") {
   U_stat <- colMeans(segment1, na.rm = TRUE) - colMeans(segment2, na.rm = TRUE)
   return(list(U_stat=U_stat, S1=segment1, S2=segment2))
 }
@@ -553,22 +568,21 @@ meas_index<-function(Location,infor_tau,tau){
 
 
 
-
-n <- 144
-K_n <- 2
-sigma <- .1
+n <- 2000
+K_n <- 10
+sigma <- 1
 AR_phi <- 0.4
 error <- "gaussian"
-tau_manual <- c(91,135)
-sim <- simulate_piecewise_linear_discontinuous(n=n, K_n=K_n, error = error, AR_phi = AR_phi, tau_manual=tau_manual, sigma=sigma)
+#tau_manual <- c(91,135)
+sim <- simulate_piecewise_linear_discontinuous(n=n, K_n=K_n, error = error, AR_phi = AR_phi, sigma=sigma)
 Y <- sim$Y
 X <- sim$X
-block_size <- 3
-alpha <- .5
+block_size <- 8
+alpha <- .2
 
 tau_star <- sim$tau_true
 K <- length(tau_star)
-eta_n <- 8 # min(60, floor(n^(1/2)))
+eta_n <- min(60, floor(n^(1/2)))
 # tau_star
 
 # Compare with moment kernel
@@ -616,9 +630,9 @@ K_n <- 10
 n_sim <- 200
 sigma <- 1
 AR_phi <- 0.4
-MA_psi <- 0.
+
 error <- "gaussian"
-block_size <- 2
+block_size <- 8
 alpha <- .2
 eta_n <- min(60, floor(n^(1/2))) # set to 35 for n=1500
 
@@ -676,7 +690,7 @@ while (s <= n_sim) {
 
     # --- Run R-MOPS ---
     candidate_cps_refined <- generate_candidate_change_points(
-      Y, X, method = "PELT",
+      Y, X, method = "PELT", p=1,
       p_n = floor(2 * n^(2/5)),
       eta_n = eta_n
     )
@@ -730,15 +744,15 @@ print(summary_table)
 
 # ---- grids you want to sweep ----
 alpha_grid <- c(0.5)
-sigma_grid <- c(.1)
-block_grid <- c(3)
-eta_grid <- c(7,8,9)
+sigma_grid <- c(.1, .5, 1)
+block_grid <- c(2,3,4)
+eta_grid <- c(5,6,7,8,9)
 
 # ---- fixed settings ----
 n <- 144
 K_n <- 2
 tau_manual <- c(91,135)
-n_sim <- 100
+n_sim <- 1000
 AR_phi <- 0.4
 error <- "gaussian"
 eta_n <- min(60, floor(n^(1/2)))
@@ -888,4 +902,4 @@ out <- do.call(rbind, lapply(seq_along(results), function(i) {
 }))
 
 print(out)
-saveRDS(out, "simulation_results_alpha_sigma_block_n5000_block6-8-10.rds")
+saveRDS(out, "simulation_results_alpha_sigma_block_n144.rds")
