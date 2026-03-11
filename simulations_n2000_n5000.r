@@ -1,587 +1,28 @@
 library(strucchange)
 library(zoo)
-source('./MethodCode/PELTtrendARp.R')
 library(WeightedPortTest)
 library(parallel)
 library(foreach)
 library(doParallel)
 
-robust_change_point_detection <- function(Y, X=NULL, p=1, block_size=5, alpha = 0.05, candidate_method = "WBS", 
-                                         p_n = NULL, eta_n = 30, kernel_type = "sign") {
-  
-  # Input validation
-  if (is.vector(Y)) Y <- matrix(Y, ncol = 1)
-  n <- nrow(Y)
-  d <- ncol(Y)
-  
-  if (n %% 2 != 0) {
-    warning("Sample size n is odd. Removing last observation to make n even.")
-    Y <- Y[1:(n-1), , drop = FALSE]
-    n <- n - 1
-  }
-  
-  m <- n / 2
-  if (is.null(p_n)) p_n <- floor(2 * n^(2/5))
-  
-
-  # Split data into odd and even indices
-  Y_indices <- seq(1, n)
-  #O_indices <- seq(1, n, by = 2)
-  #E_indices <- seq(2, n, by = 2)
-  
-
-  idx <- seq_len(n)
-  block_id <- ceiling(idx / block_size)
-
-  O_indices <- idx[block_id %% 2 == 1]
-  E_indices <- idx[block_id %% 2 == 0]
-
-  YO_data <- Y[O_indices, , drop = FALSE]
-  YE_data <- Y[E_indices, , drop = FALSE]  
-
-  if (!is.null(X)) {
-    # If X is a vector (no columns!)
-    if (is.vector(X)) {
-      XO_data <- matrix(X[O_indices], ncol = 1)
-      XE_data <- matrix(X[E_indices], ncol = 1)
-
-    # If X is already a matrix/data.frame with ≥ 1 column
-    } else {
-      XO_data <- X[O_indices, , drop = FALSE]
-      XE_data <- X[E_indices, , drop = FALSE]
-    }
-  } else {
-    XO_data <- NULL
-    XE_data <- NULL
-  }
-
-  # Step 1: Generate candidate change-points using first half of data
-  candidate_cps <- generate_candidate_change_points(YO_data, XO_data, p=p, method = candidate_method, 
-                                                   p_n = p_n, eta_n = eta_n)
-  p_n_actual <- length(candidate_cps)
-  
-  if (p_n_actual == 0) {
-    return(list(change_points = numeric(0), statistics = numeric(0), 
-               threshold = Inf, FDP_estimate = numeric(0)))
-  }
-  
-  # Add boundaries
-  candidate_cps <- c(0, candidate_cps, m)
-  p_n_actual <- length(candidate_cps) - 2
-
-  
-  # Step 2: Compute test statistics T_j
-  T_stats <- compute_test_statistics(candidate_cps, Y, X,
-                                    O_indices, E_indices,
-                                    kernel_type, p = 1)
-
-  # Step 3: Select threshold controlling FDR
-  threshold_result <- select_fdr_threshold(T_stats, alpha)
-  
-  # Step 4: Identify significant change-points
-  significant_cps <- which(T_stats >= threshold_result$threshold)
-  detected_cps <- candidate_cps[significant_cps + 1]  # +1 to skip initial 0
-  
-  # Map back to original indices (approximately)
-  original_indices <- Y_indices[detected_cps * 2]  # Rough mapping
-  
-  return(list(
-    change_points = original_indices,
-    statistics = T_stats,
-    threshold = threshold_result$threshold,
-    FDP_estimate = threshold_result$FDP_curve,
-    candidate_points = candidate_cps[-c(1, length(candidate_cps))] * 2  # Remove boundaries
-  ))
-}
-
-
-
-compute_test_statistics <- function(candidate_cps, Y, X,
-                                    O_indices, E_indices,
-                                    kernel_type = NULL, p = 1) {
-
-  # -------- helpers --------
-  safe_beta2 <- function(coefs) {
-    if (is.null(coefs) || length(coefs) < 2) return(c(0, 0))
-    as.numeric(coefs[1:2])
-  }
-  safe_phi1 <- function(coefs, p) {
-    if (p < 1) return(0)
-    if (is.null(coefs) || is.null(names(coefs))) return(0)
-    if (!("ar1" %in% names(coefs))) return(0)
-    as.numeric(coefs["ar1"])
-  }
-
-  # Build AR(1) innovations eps_t and corresponding "whitened" regressors Xtilde_t
-  # for a concatenation of (segment1, segment2), with boundary step using last u1/x1.
-  make_eps_and_Xtilde_ar1 <- function(u1, X1, u2, X2, phi) {
-    n1 <- length(u1); n2 <- length(u2)
-
-    eps1 <- rep(NA_real_, n1)
-    eps2 <- rep(NA_real_, n2)
-
-    Xtilde1 <- matrix(NA_real_, nrow = n1, ncol = ncol(X1))
-    Xtilde2 <- matrix(NA_real_, nrow = n2, ncol = ncol(X2))
-
-    # within seg1: t = 2..n1
-    if (n1 >= 2) {
-      eps1[2:n1] <- u1[2:n1] - phi * u1[1:(n1 - 1)]
-      Xtilde1[2:n1, ] <- X1[2:n1, , drop = FALSE] - phi * X1[1:(n1 - 1), , drop = FALSE]
-    }
-
-    # boundary for first point in seg2 (if exists)
-    if (n2 >= 1 && n1 >= 1) {
-      eps2[1] <- u2[1] - phi * u1[n1]
-      Xtilde2[1, ] <- X2[1, , drop = FALSE] - phi * X1[n1, , drop = FALSE]
-    }
-
-    # within seg2: t = 2..n2
-    if (n2 >= 2) {
-      eps2[2:n2] <- u2[2:n2] - phi * u2[1:(n2 - 1)]
-      Xtilde2[2:n2, ] <- X2[2:n2, , drop = FALSE] - phi * X2[1:(n2 - 1), , drop = FALSE]
-    }
-
-    list(eps1 = eps1, eps2 = eps2, Xtilde1 = Xtilde1, Xtilde2 = Xtilde2)
-  }
-
-  # -------- main loop --------
-  p_n <- length(candidate_cps) - 2
-  T_stats <- rep(-Inf, p_n)
-
-  for (j in 1:p_n) {
-
-    # Segment boundaries in "candidate index space"
-    start <- candidate_cps[j] + 1
-    cp    <- candidate_cps[j + 1]
-    end   <- candidate_cps[j + 2]
-
-    n_j  <- cp - start + 1
-    n_j1 <- end - cp
-
-    if (n_j < 1 || n_j1 < 1) {
-      T_stats[j] <- -Inf
-      next
-    }
-
-    # Map back to full-data indices (your original mapping)
-    start_full <- 2 * start - 1
-    cp_full    <- 2 * cp
-    end_full   <- 2 * end
-
-    idx1 <- start_full:cp_full
-    idx2 <- (cp_full + 1):end_full
-
-    if (length(idx1) < 2 || length(idx2) < 1) {
-      T_stats[j] <- -Inf
-      next
-    }
-
-    # Split masks
-    in_O_seg1 <- idx1 %in% O_indices
-    in_E_seg1 <- idx1 %in% E_indices
-    in_O_seg2 <- idx2 %in% O_indices
-    in_E_seg2 <- idx2 %in% E_indices
-
-    # Extract full segments
-    segment1Y <- Y[idx1]
-    segment2Y <- Y[idx2]
-    segment1X <- X[idx1, , drop = FALSE]
-    segment2X <- X[idx2, , drop = FALSE]
-
-    # Subsamples used to fit parameters (odd/even)
-    y1O <- segment1Y[in_O_seg1]
-    X1O <- segment1X[in_O_seg1, , drop = FALSE]
-    y1E <- segment1Y[in_E_seg1]
-    X1E <- segment1X[in_E_seg1, , drop = FALSE]
-
-    # Need enough points to fit; if not, skip
-    if (length(y1O) < 2 || length(y1E) < 2) {
-      T_stats[j] <- -Inf
-      next
-    }
-
-    # Fit on O and E (once each)
-    fitO  <- trendARpsegfit_arimax(y1O, X1O, p = p)
-    fitE  <- trendARpsegfit_arimax(y1E, X1E, p = p)
-    coefO <- fitO$coef
-    coefE <- fitE$coef
-
-    beta_hatO <- safe_beta2(coefO)
-    beta_hatE <- safe_beta2(coefE)
-    phiO      <- safe_phi1(coefO, p)
-    phiE      <- safe_phi1(coefE, p)
-
-    # Residuals for FULL segments using SAME beta (as you intended)
-    u1O_full <- as.numeric(segment1Y - segment1X %*% beta_hatO)
-    u2O_full <- as.numeric(segment2Y - segment2X %*% beta_hatO)
-
-    u1E_full <- as.numeric(segment1Y - segment1X %*% beta_hatE)
-    u2E_full <- as.numeric(segment2Y - segment2X %*% beta_hatE)
-
-    # Build innovations + whitened regressors for O and E
-    wO <- make_eps_and_Xtilde_ar1(u1O_full, segment1X, u2O_full, segment2X, phiO)
-    wE <- make_eps_and_Xtilde_ar1(u1E_full, segment1X, u2E_full, segment2X, phiE)
-
-    # Now restrict to O/E indices AND drop NA rows (first obs of seg1 is NA)
-    # Segment 1
-    keep1O <- in_O_seg1 & !is.na(wO$eps1)
-    keep1E <- in_E_seg1 & !is.na(wE$eps1)
-    # Segment 2
-    keep2O <- in_O_seg2 & !is.na(wO$eps2)
-    keep2E <- in_E_seg2 & !is.na(wE$eps2)
-
-    eps1O <- wO$eps1[keep1O]
-    eps2O <- wO$eps2[keep2O]
-    X1O_t <- wO$Xtilde1[keep1O, , drop = FALSE]
-    X2O_t <- wO$Xtilde2[keep2O, , drop = FALSE]
-
-    eps1E <- wE$eps1[keep1E]
-    eps2E <- wE$eps2[keep2E]
-    X1E_t <- wE$Xtilde1[keep1E, , drop = FALSE]
-    X2E_t <- wE$Xtilde2[keep2E, , drop = FALSE]
-
-    # Need non-empty for U-statistic
-    if (length(eps1O) < 1 || length(eps2O) < 1 || length(eps1E) < 1 || length(eps2E) < 1) {
-      T_stats[j] <- -Inf
-      next
-    }
-
-    # Scores: s_t = Xtilde_t * eps_t  (no sigma scaling)
-    S1O <- X1O_t * as.numeric(eps1O)
-    S2O <- X2O_t * as.numeric(eps2O)
-
-    S1E <- X1E_t * as.numeric(eps1E)
-    S2E <- X2E_t * as.numeric(eps2E)
-
-    # Compute L_j^E and L_j^O
-    result_E <- compute_U_statistic_linear_trend(S1E, S2E)
-    result_O <- compute_U_statistic_linear_trend(S1O, S2O)
-
-    L_j_E <- result_E$U_stat
-    L_j_O <- result_O$U_stat
-    S1    <- result_O$S1
-    S2    <- result_O$S2
-
-    # Covariance estimate
-    Sigma_hat <- moving_range_Omega_inv(S1, S2)
-
-    if (rcond(Sigma_hat) < 1e-10) {
-      Sigma_hat <- Sigma_hat + diag(ncol(X)) * 1e-6
-    }
-
-    scale_factor <- (n_j * n_j1) / (n_j + n_j1)
-    T_stats[j] <- as.numeric(scale_factor * t(L_j_O) %*% solve(Sigma_hat) %*% L_j_E)
-  }
-
-  T_stats
-}
-
-
-#' Compute U-statistic for linear trend change-point
-compute_U_statistic_linear_trend <- function(segment1, segment2, kernel_type = "moment") {
-  U_stat <- colMeans(segment1, na.rm = TRUE) - colMeans(segment2, na.rm = TRUE)
-  return(list(U_stat=U_stat, S1=segment1, S2=segment2))
-}
-
-trendARpsegfit_arimax <- function(y, X, p = p) {
-  X <- as.matrix(X)
-  y <- as.numeric(y)
-  n <- length(y)
-
-  fit <- arima(
-    y,
-    order = c(p, 0, 0),
-    xreg = X,
-    include.mean = FALSE,
-    method = "ML"
-  )
-
-  coef_raw <- coef(fit)
-
-  beta_names <- colnames(X)
-  ar_names   <- paste0("ar", seq_len(p))
-
-  # helper: safely extract by name, fill missing with 0
-  safe_extract_vec <- function(coefs, names_vec) {
-    out <- numeric(length(names_vec))
-    names(out) <- names_vec
-    
-    if (is.null(coefs)) return(out)
-    
-    present <- intersect(names_vec, names(coefs))
-    out[present] <- coefs[present]
-    
-    out
-  }
-
-  beta_hat <- safe_extract_vec(coef_raw, beta_names)
-  phi_hat  <- safe_extract_vec(coef_raw, ar_names)
-
-  coef_all <- c(beta_hat, phi_hat)
-
-  # trend fit + residuals
-  trend_fit <- as.numeric(X %*% beta_hat)
-  trend_res <- y - trend_fit
-
-  # whitened residuals (innovations)
-  e <- trend_res
-  if (p >= 1) {
-    for (k in 1:p) {
-      e[(k + 1):n] <- e[(k + 1):n] - phi_hat[k] * trend_res[1:(n - k)]
-    }
-    e[1:p] <- NA_real_
-  }
-
-  list(
-    coef       = coef_all,      # Intercept, Trend, ar1
-    beta_hat   = beta_hat,
-    phi_hat    = phi_hat,
-    trend_fit  = trend_fit,
-    trend_res  = trend_res,
-    ar_fit     = e,             # whitened residuals
-    ar_res     = e,
-    fit        = fit
-  )
-}
-
-#' Generate candidate change-points using PELT
-generate_candidate_change_points <- function(Y, X, p=p, method = "WBS", p_n, eta_n) {
-    if (method == "PELT") {
-      candidates = PELT.trendARp(Y, p=p, pen=0, minseglen=eta_n)
-      if (length(candidates) > p_n) {
-        print("More candidates than p_n found.")
-      }
-
-      return(candidates)
-    } else {
-      stop("Unknown candidate method for linear_trend-type CPs. Use 'PELT'.")
-    }
-  }
-# Moving-range / difference-based estimator from Zou-Wang-Li style
-# Returns Omega_inv_hat (estimate of Omega^{-1})
-moving_range_Omega_inv <- function(S1, S2) {
-  S1 <- as.matrix(S1)
-  S2 <- as.matrix(S2)
-  stopifnot(ncol(S1) == ncol(S2))
-
-  S <- rbind(S1, S2)          # m x d
-  m <- nrow(S)
-  d <- ncol(S)
-
-  if (m < 5) stop("Need at least 5 rows total to use 2-step differences (2i-1, 2i-3).")
-
-  # indices: 2i-1 for i=2..floor((m+1)/2)  => j = 3,5,7,...
-  j_max <- if (m %% 2 == 1) m else (m - 1)
-  j_seq <- seq(3, j_max, by = 2)  # 3,5,...,j_max
-  n_terms <- length(j_seq)
-  if (n_terms < 1) stop("Not enough terms for the moving-range estimator.")
-
-  Omega_inv_hat <- matrix(0, d, d)
-
-  for (j in j_seq) {
-    diff <- S[j, ] - S[j - 2, ]      # (S_{2i-1} - S_{2i-3})
-    Omega_inv_hat <- Omega_inv_hat + tcrossprod(diff)  # diff %*% t(diff)
-  }
-
-  Omega_inv_hat <- Omega_inv_hat / (2 * (n_terms))  # 2(m-1) in their notation; here n_terms = m-1 over odd subseq
-  Omega_inv_hat
-}
-
-
-
-#' Select threshold controlling FDR using symmetry property
-select_fdr_threshold <- function(T_stats, alpha) {
-  # Remove infinite values
-  finite_idx <- is.finite(T_stats)
-  T_finite <- T_stats[finite_idx]
-  
-  if (length(T_finite) == 0) {
-    return(list(threshold = Inf, FDP_curve = numeric(0)))
-  }
-  
-  # Generate threshold candidates
-  t_candidates <- sort(unique(c(0, abs(T_finite))))
-  if (length(t_candidates) == 0) {
-    return(list(threshold = Inf, FDP_curve = numeric(0)))
-  }
-  
-  FDP_estimates <- numeric(length(t_candidates))
-  
-  for (i in 1:length(t_candidates)) {
-    t <- t_candidates[i]
-    
-    # Count positive statistics above threshold
-    R_plus <- sum(T_finite >= t)
-    
-    # Count negative statistics below -t (using symmetry)
-    R_minus <- sum(T_finite <= -t)
-    
-    # Estimated FDP
-    #print("FDP .1 instead of 1")
-    FDP_estimates[i] <- (.05 + R_minus) / max(R_plus, 1)
-  }
-  
-  # Find the largest threshold that controls FDR
-  valid_thresholds <- t_candidates[FDP_estimates <= alpha]
-  
-  if (length(valid_thresholds) > 0) {
-    threshold <- min(valid_thresholds)
-  } else {
-    threshold <- Inf
-  }
-  
-  return(list(
-    threshold = threshold,
-    FDP_curve = data.frame(threshold = t_candidates, FDP = FDP_estimates)
-  ))
-}
-
-simulate_piecewise_linear_discontinuous <- function(
-  n = 2000, K_n = 10,
-  error = "gaussian", sigma = 12,
-  AR_phi = 0.4,
-  tau_manual = NULL
-) {
-  ## 1) Generate true change-points
-  if (is.null(tau_manual)) {
-    tau <- floor((1:K_n) * n / (K_n + 1)) + runif(K_n, -n^(1/4), n^(1/4))
-    tau <- sort(pmax(2, pmin(n - 1, round(tau))))
-    tau <- unique(tau)
-  } else {
-    tau <- sort(unique(as.integer(round(tau_manual))))
-    if (length(tau) == 0) stop("tau_manual must contain at least one change-point.")
-    if (any(!is.finite(tau))) stop("tau_manual must contain only finite values.")
-    if (any(tau < 2 | tau > (n - 1))) {
-      stop("tau_manual must be between 2 and n-1.")
-    }
-  }
-  K_n <- length(tau)
-
-  breaks <- c(tau, n)
-  starts <- c(1, tau + 1)
-
-  ## 2) Slopes + intercepts per segment (DIScontinuous)
-  beta1_grid <- c(0.01, -0.02, 0.03, -0.015, 0.025,
-                  -0.01, 0.05, -0.04, 0.02, -0.03, 0.01)
-
-  beta0 <- beta1 <- numeric(n)
-
-  # segment-wise trend used ONLY to generate Y
-  Xseg <- numeric(n)
-
-  jump_sd <- 1
-  b0_grid <- rnorm(K_n + 1, mean = 0, sd = jump_sd)
-
-  for (k in 1:(K_n + 1)) {
-    s <- starts[k]
-    e <- breaks[k]
-
-    idx1 <- ((k - 1) %% length(beta1_grid)) + 1
-    b1_k <- sample(beta1_grid, size = 1)
-    b0_k <- b0_grid[k]
-
-    # reset-to-1 trend within segment
-    Xk <- seq_len(e - s + 1)
-    Xseg[s:e] <- Xk
-
-    beta0[s:e] <- b0_k
-    beta1[s:e] <- b1_k
-  }
-
-  ## 3) i.i.d innovations u_t
-  u <- switch(error,
-    "gaussian" = rnorm(n),
-    "t3"       = rt(n, df = 3) / sqrt(3),
-    "mix"      = 0.8 * rnorm(n) + 0.2 * rnorm(n, sd = 3),
-    "chi2"     = (rchisq(n, df = 3) - 3) / sqrt(6),
-    "cauchy"   = rcauchy(n) * 0.3,
-    stop("Unknown error option.")
-  )
-
-  ## 4) AR(1) filtering (for ALL error types)
-  err <- numeric(n)
-  err[1] <- u[1]
-  for (i in 2:n) err[i] <- AR_phi * err[i - 1] + u[i]
-  err <- err / sd(err)  # optional standardization
-
-  ## 5) Construct response using segment-wise trend
-  Y <- beta0 + beta1 * Xseg + sigma * err
-
-  ## 6) Return GLOBAL trend as covariate
-  X <- 1:n
-  Xmat <- cbind(Intercept = 1, Trend = X)
-
-  list(
-    Y = Y,
-    X = Xmat,        # <-- global trend
-    Xseg = Xseg,     # <-- segment-wise trend used in DGP (kept for diagnostics)
-    beta0 = beta0,
-    beta1 = beta1,
-    tau_true = tau
-  )
-}
-
-dist_cp_mat <- function(T_hat, T_star) {
-  T_hat  <- as.numeric(T_hat)
-  T_star <- as.numeric(T_star)
-
-  if (length(T_star) == 0) return(0)
-  if (length(T_hat)  == 0) return(Inf)
-
-  D <- abs(outer(T_hat, T_star, "-"))   # rows: T_hat, cols: T_star
-  mean(apply(D, 2, min))
-}
-
-
-# ---- Fixed refine function (pass K and tau_star as arguments) ----
-refine <- function(th_L, Location_e, K, tau_star) {
-  Location_p <- numeric()
-  
-  if (length(Location_e) == 0) {
-    return(list(Location_p = numeric(), infor_tau = numeric()))
-  }
-  
-  for (i in 1:length(Location_e)) {
-    remaining <- setdiff(th_L, Location_p)
-    if (length(remaining) == 0) break
-    dista <- abs(remaining - Location_e[i])
-    Location_p[length(Location_p) + 1] <- remaining[which.min(dista)]
-  }
-  
-  infor_tau <- sapply(1:K, function(t) {
-    if (length(Location_p) == 0) return(NA)
-    Location_p[which.min(abs(Location_p - tau_star[t]))]
-  })
-  
-  list(Location_p = Location_p, infor_tau = infor_tau)
-}
-
-# ---- Fixed meas_index function (pass K as argument) ----
-meas_index <- function(Location, infor_tau, tau, K) {
-  numb_dif <- length(Location)
-  trueD <- intersect(Location, infor_tau)
-  fdr <- (numb_dif - length(trueD)) / max(numb_dif, 1)
-  tdr <- length(trueD) / K
-  Pa <- ifelse(tdr == 1, 1, 0)
-  
-  if (length(Location) > 0) {
-    temp_dist <- sapply(1:K, function(t) {
-      min(abs(Location - tau[t]))
-    })
-    dist <- mean(temp_dist)
-  } else {
-    dist <- Inf
-  }
-  
-  return(c(fdr, tdr, Pa, numb_dif, dist))
-}
-
+source('./MethodCode/PELTtrendARp.R')
+source('./MethodCode/MainCode.R')
 
 # ---- grids you want to sweep ----
-alpha_grid <- c(0.2, .5)
-sigma_grid <- c(.1, 1)
-block_grid <- c(5, 6, 7, 8, 9,10)
-eta_grid <- c(34, 44, 49)
+alpha_grid <- c(.1, .2)
+sigma2_grid <- c(.01, .1, .25, .5)
+eta_grid <- c(34, 39, 44, 49, 54)
+
+# ---- block_size grid depends on sigma2 ----
+get_block_grid <- function(sigma2) {
+  if (sigma2 %in% c(0.01, 0.1)) {
+    return(1:5)
+  } else if (sigma2 %in% c(0.25, 0.5)) {
+    return(5:10)
+  } else {
+    return(1:5)  # default
+  }
+}
 
 # ---- fixed settings ----
 n <- 2000
@@ -591,6 +32,10 @@ AR_phi <- 0.4
 error <- "gaussian"
 tau_manual <- NULL
 
+# settings needed for refine() and meas_index() to run, but not used in evaluation
+K <- K_n # doesnt matter but needed for refine() to run
+tau_star <- c(rep(0, K)) # dummy for refine() to run; not used in our evaluation
+
 # "bad" result detector
 is_bad_row <- function(x) {
   x <- as.numeric(x)
@@ -598,7 +43,7 @@ is_bad_row <- function(x) {
 }
 
 # Single simulation run (self-contained, no global dependencies)
-run_single_sim <- function(sim_id, alpha, sigma, block_size, eta_n, n, K_n, error, AR_phi, tau_manual) {
+run_single_sim <- function(sim_id, alpha, sigma2, block_size, eta_n, n, K_n, error, AR_phi, tau_manual) {
   
   max_attempts <- 50
   attempt <- 0
@@ -609,7 +54,7 @@ run_single_sim <- function(sim_id, alpha, sigma, block_size, eta_n, n, K_n, erro
     result <- tryCatch({
       sim <- simulate_piecewise_linear_discontinuous(
         n = n, K_n = K_n, error = error, AR_phi = AR_phi, 
-        tau_manual = tau_manual, sigma = sigma
+        tau_manual = tau_manual, sigma2 = sigma2
       )
       
       Y <- sim$Y
@@ -644,7 +89,7 @@ run_single_sim <- function(sim_id, alpha, sigma, block_size, eta_n, n, K_n, erro
       
       # --- R-MOPS ---
       candidate_cps_refined <- generate_candidate_change_points(
-        Y, X, method = "PELT", p = 1,
+        Y, X, method = "PELT", p = 1, q=0,
         p_n = floor(2 * n^(2 / 5)),
         eta_n = eta_n
       )
@@ -656,7 +101,7 @@ run_single_sim <- function(sim_id, alpha, sigma, block_size, eta_n, n, K_n, erro
       
       # Pass K explicitly to meas_index
       rmops_row <- meas_index(location_p, R_infor_tau, tau_star, K)
-      
+
       if (is_bad_row(mops_row) || is_bad_row(rmops_row)) {
         NULL
       } else {
@@ -678,7 +123,7 @@ run_single_sim <- function(sim_id, alpha, sigma, block_size, eta_n, n, K_n, erro
 }
 
 # One setting runner using foreach (more efficient)
-run_one_parallel <- function(alpha, sigma, block_size, eta_n, n_cores = NULL) {
+run_one_parallel <- function(alpha, sigma2, block_size, eta_n, n_cores = NULL) {
   
   if (is.null(n_cores)) {
     n_cores <- max(1, detectCores() - 2)
@@ -696,29 +141,20 @@ run_one_parallel <- function(alpha, sigma, block_size, eta_n, n_cores = NULL) {
     registerDoSEQ()
   })
   
-  # Export all required functions to workers
-  clusterExport(cl, c(
-    "simulate_piecewise_linear_discontinuous",
-    "robust_change_point_detection",
-    "generate_candidate_change_points",
-    "compute_test_statistics",
-    "compute_U_statistic_linear_trend",
-    "trendARpsegfit_arimax",
-    "moving_range_Omega_inv",
-    "select_fdr_threshold",
-    "refine",
-    "meas_index",
-    "dist_cp_mat",
-    "is_bad_row",
-    "run_single_sim",
-    "n_sim"
-  ), envir = globalenv())
+  # Load packages on workers FIRST
+  clusterEvalQ(cl, {
+    library(strucchange)
+    library(zoo)
+    library(WeightedPortTest)
+    library(forecast)
+    source('/Users/barend/Documents/changepoints/MethodCode/PELTtrendARp.R')
+    source('/Users/barend/Documents/changepoints/MethodCode/MainCode.R')
+  })
   
   # Export the current function parameters to workers
-  # Use a named list to avoid scoping issues
   local_params <- list(
     alpha = alpha,
-    sigma = sigma,
+    sigma2 = sigma2,
     block_size = block_size,
     eta_n = eta_n,
     n = n,
@@ -727,25 +163,18 @@ run_one_parallel <- function(alpha, sigma, block_size, eta_n, n_cores = NULL) {
     AR_phi = AR_phi,
     tau_manual = tau_manual
   )
-  clusterExport(cl, "local_params", envir = environment())
-  
-  # Load packages on workers
-  clusterEvalQ(cl, {
-    library(strucchange)
-    library(zoo)
-    library(WeightedPortTest)
-    source('./MethodCode/PELTtrendARp.R')
-  })
-  
-  # Run using foreach - NO .export needed since we use clusterExport
+  clusterExport(cl, c("local_params", "is_bad_row", "run_single_sim", "n_sim"), envir = environment())
+
+  # Run using foreach
   results_list <- foreach(
     i = 1:n_sim,
-    .errorhandling = "pass"
+    .errorhandling = "pass",
+    .packages = c("strucchange", "zoo", "WeightedPortTest", "forecast")
   ) %dopar% {
     run_single_sim(
       sim_id = i,
       alpha = local_params$alpha,
-      sigma = local_params$sigma,
+      sigma2 = local_params$sigma2,
       block_size = local_params$block_size,
       eta_n = local_params$eta_n,
       n = local_params$n,
@@ -775,7 +204,7 @@ run_one_parallel <- function(alpha, sigma, block_size, eta_n, n_cores = NULL) {
   summary_RMOPS <- colMeans(RMOPS_results, na.rm = TRUE)
   
   list(
-    params = data.frame(alpha = alpha, sigma = sigma, 
+    params = data.frame(alpha = alpha, sigma2 = sigma2, 
                         block_size = block_size, eta_n = eta_n),
     summary_table = rbind(MOPS = summary_MOPS, RMOPS = summary_RMOPS),
     n_valid = n_valid,
@@ -784,14 +213,25 @@ run_one_parallel <- function(alpha, sigma, block_size, eta_n, n_cores = NULL) {
 }
 
 # ---- run all combinations ----
-grid <- expand.grid(
-  alpha = alpha_grid,
-  sigma = sigma_grid,
-  block_size = block_grid,
-  eta_n = eta_grid,
-  KEEP.OUT.ATTRS = FALSE,
-  stringsAsFactors = FALSE
-)
+# Build custom grid with sigma2-dependent block_size
+grid <- do.call(rbind, lapply(sigma2_grid, function(s2) {
+  block_sizes <- get_block_grid(s2)
+  expand.grid(
+    alpha = alpha_grid,
+    sigma2 = s2,
+    block_size = block_sizes,
+    eta_n = eta_grid,
+    KEEP.OUT.ATTRS = FALSE,
+    stringsAsFactors = FALSE
+  )
+}))
+
+# Reset row names
+rownames(grid) <- NULL
+
+cat(sprintf("Total grid combinations: %d\n", nrow(grid)))
+cat("Grid preview:\n")
+print(head(grid, 20))
 
 n_cores <- max(1, detectCores() - 2)
 cat(sprintf("Detected %d cores, using %d for parallel execution\n", detectCores(), n_cores))
@@ -799,15 +239,15 @@ cat(sprintf("Detected %d cores, using %d for parallel execution\n", detectCores(
 results <- vector("list", nrow(grid))
 
 for (i in seq_len(nrow(grid))) {
-  cat(sprintf("Running %d/%d: alpha=%s sigma=%s block=%s eta_n=%s\n",
-              i, nrow(grid), grid$alpha[i], grid$sigma[i], 
+  cat(sprintf("Running %d/%d: alpha=%s sigma2=%s block=%s eta_n=%s\n",
+              i, nrow(grid), grid$alpha[i], grid$sigma2[i], 
               grid$block_size[i], grid$eta_n[i]))
   
   start_time <- Sys.time()
   
   results[[i]] <- run_one_parallel(
     alpha = grid$alpha[i],
-    sigma = grid$sigma[i],
+    sigma2 = grid$sigma2[i],
     block_size = grid$block_size[i],
     eta_n = grid$eta_n[i],
     n_cores = n_cores
@@ -828,7 +268,7 @@ out <- do.call(rbind, lapply(seq_along(results), function(i) {
   
   data.frame(
     alpha = res$params$alpha,
-    sigma = res$params$sigma,
+    sigma2 = res$params$sigma2,
     block_size = res$params$block_size,
     eta_n = res$params$eta_n,
     method = rownames(tab),
@@ -841,4 +281,164 @@ out <- do.call(rbind, lapply(seq_along(results), function(i) {
 }))
 
 print(out)
-saveRDS(out, "simulation_results_block_eta_n2000.rds")
+saveRDS(out, "simulation_results_block_eta_n2000_21-2.rds")
+
+
+# df must be a data.frame with columns:
+# alpha, sigma2, block_size, eta_n, method, n_valid, attempts, and metrics in columns "1","2","3","4","5"
+# where:
+# 1=FDR, 2=TPR, 3=Pa, 4=Khat, 5=d
+library(dplyr)
+library(tidyr)
+
+# out must have columns:
+# alpha, sigma2, block_size, eta_n, method, n_valid, attempts, and metrics in columns "1","2","3","4","5"
+# where:
+# 1=FDR, 2=TPR, 3=Pa, 4=Khat, 5=d
+
+# -----------------------
+# 1) Keep only RMOPS + rename metrics
+# -----------------------
+df_rm <- out %>%
+  mutate(method = toupper(method)) %>%
+  filter(method == "RMOPS") %>%
+  rename(
+    FDR  = `1`,
+    TPR  = `2`,
+    Pa   = `3`,
+    Khat = `4`,
+    d    = `5`
+  )
+
+# -----------------------
+# 2) Function: make LaTeX for one sigma2
+#    (includes BOTH alphas as separate panels)
+# -----------------------
+make_latex_table_for_sigma <- function(df_rm, sigma2_value,
+                                       caption = "Simulation results ($S=1000$, RMOPS)",
+                                       label   = "tab:sim_rmops") {
+
+  sub <- df_rm %>%
+    filter(abs(sigma2 - sigma2_value) < 1e-12) %>%
+    arrange(alpha, eta_n, block_size)
+
+  blocks <- sort(unique(sub$block_size))
+  metrics <- c("FDR","TPR","Pa","Khat","d")
+
+  # Helper: format values
+  fmt3 <- function(x) ifelse(is.na(x), "", sprintf("%.3f", x))
+
+  # Column format: eta + 5 * (#blocks)
+  col_format <- paste0(
+    "c",
+    "@{\\hspace{15pt}}",
+    paste(rep("c", 5 * length(blocks)), collapse = "")
+  )
+
+  # Header: block groups (shown as \ell = ...)
+  group_header <- paste0(
+    " & ",
+    paste(
+      vapply(blocks, function(b) sprintf("\\multicolumn{5}{c}{$\\ell = %d$}", b), character(1)),
+      collapse = " & "
+    ),
+    " \\\\"
+  )
+
+  # cmidrules
+  cmid <- paste(
+    vapply(seq_along(blocks), function(i) {
+      left  <- 2 + 5*(i-1)
+      right <- 1 + 5*i
+      sprintf("\\cmidrule(lr){%d-%d}", left, right)
+    }, character(1)),
+    collapse = "\n"
+  )
+
+  metric_header <- paste0(
+    " & ",
+    paste(rep("FDR & TPR & $P_a$ & $\\hat{K}$ & $d$", length(blocks)), collapse = " & "),
+    " \\\\"
+  )
+
+  # Start LaTeX
+  out_tex <- c(
+    "\\begin{landscape}",
+    "\\begin{table}[ht]",
+    "\\centering",
+    sprintf("\\caption{%s}", caption),
+    sprintf("\\label{%s}", label),
+    "\\setlength{\\tabcolsep}{4pt}",
+    "\\begin{adjustbox}{max width=1.35\\textwidth}",
+    sprintf("\\begin{tabular}{%s}", col_format),
+    "\\toprule",
+    paste0("$\\eta_n$", group_header),
+    cmid,
+    metric_header,
+    "\\midrule",
+    sprintf("\\multicolumn{%d}{c}{\\textbf{$\\sigma^2_{\\varepsilon} = %.2f$}} \\\\",
+            1 + 5*length(blocks), sigma2_value),
+    "\\midrule"
+  )
+
+  # Panels by alpha
+  for (a in sort(unique(sub$alpha))) {
+
+    out_tex <- c(out_tex,
+      sprintf("\\multicolumn{%d}{l}{\\textbf{$\\alpha = %.1f$}} \\\\",
+              1 + 5*length(blocks), a),
+      "\\midrule"
+    )
+
+    wide <- sub %>%
+      filter(abs(alpha - a) < 1e-12) %>%
+      select(eta_n, block_size, all_of(metrics)) %>%
+      pivot_longer(cols = all_of(metrics), names_to = "metric", values_to = "value") %>%
+      mutate(metric = factor(metric, levels = metrics)) %>%
+      pivot_wider(names_from = c(block_size, metric), values_from = value) %>%
+      arrange(eta_n)
+
+    # Ensure columns in order: block_size 1.. then metrics within each block
+    ordered_cols <- unlist(lapply(blocks, function(b) paste0(b, "_", metrics)))
+    names(wide) <- gsub("\\.", "_", names(wide))  # safety
+    wide <- wide %>%
+      select(eta_n, all_of(ordered_cols))
+
+    # Write rows
+    for (i in seq_len(nrow(wide))) {
+      eta <- wide$eta_n[i]
+      vals <- vapply(wide[i, -1], function(z) ifelse(is.na(z), "", sprintf("%.3f", z)), character(1))
+      out_tex <- c(out_tex, paste0(eta, " & ", paste(vals, collapse = " & "), " \\\\"))
+    }
+
+    out_tex <- c(out_tex, "\\midrule")
+  }
+
+  # End LaTeX
+  out_tex <- c(out_tex,
+    "\\bottomrule",
+    "\\end{tabular}",
+    "\\end{adjustbox}",
+    "\\end{table}",
+    "\\end{landscape}"
+  )
+
+  paste(out_tex, collapse = "\n")
+}
+
+# -----------------------
+# 3) Create one .tex per sigma2
+# -----------------------
+sigmas <- sort(unique(df_rm$sigma2))
+
+for (s2 in sigmas) {
+  tex <- make_latex_table_for_sigma(
+    df_rm,
+    sigma2_value = s2,
+    caption = "Simulation results ($S=1000$, RMOPS)",
+    label   = paste0("tab:sim_rmops_sigma", gsub("\\.", "", sprintf("%.2f", s2)))
+  )
+  outpath <- paste0("./sim_rmops_sigma", gsub("\\.", "", sprintf("%.2f", s2)), ".tex")
+  writeLines(tex, outpath)
+  message("✅ wrote ", outpath)
+}

@@ -22,6 +22,7 @@ dates_adj_yearly = df_adj_yearly$t
 #noaa 24: 1.26 25: 1.14
 #hadcrut 24: 1.17 25: 1.05
 #Berkeley 24: 1.29 25: 1.19
+
 # load raw yearly data
 file_raw_yearly = './data/temperature_anomalies.RData'
 load(file_raw_yearly)
@@ -54,7 +55,7 @@ result_moment <- robust_change_point_detection(
   X, 
   p=p,
   block_size = 2,
-  alpha = .5, 
+  alpha = .2, 
   candidate_method = "PELT",
   kernel_type = "moment", eta_n=eta_n,
 )
@@ -62,11 +63,11 @@ Location_e <- result_moment$change_points # detected change-points from moment k
 fittrend_e = fit.trendARp(Y,Location_e,p=p,plot=T,add.ar=F,fit=T,
                             dates=dates)#
 K <- length(Location_e)
-candidate_cps_refined <- generate_candidate_change_points(Y, X, p=p,method = "PELT", 
+candidate_cps_refined <- generate_candidate_change_points(Y, X, p=p,method = "PELT", q=q,
                                                    p_n = floor(2 * n^(2/5)), eta_n = eta_n) # A(Z)
 
 
-R_MOPS <- refine(candidate_cps_refined, Location_e)
+R_MOPS <- refine(candidate_cps_refined, Location_e, K, tau_star)
 Location_p <- R_MOPS$Location_p #Refined MOPS change-point Location T(Z)
 
 fittrend_p = fit.trendARp(Y, Location_p, p=p,plot=T,add.ar=F,fit=T,
@@ -134,17 +135,17 @@ format_p <- function(p) {
 get_block_size <- function(dataset, model) {
   if (dataset == "adj") {
     # For adj: NASA/NOAA blocksize=3/4, Berk/HadCRU blocksize=2
-    if (model %in% c("NASA")) return(2L)
-    if (model %in% c("NOAA")) return(2L)
-    if (model %in% c("HadCRU")) return(2L)
-    if (model %in% c("Berkeley")) return(2L)
+    if (model %in% c("NASA")) return(4L)
+    if (model %in% c("NOAA")) return(4L)
+    if (model %in% c("HadCRU")) return(4L)
+    if (model %in% c("Berkeley")) return(4L)
   }
   if (dataset == "raw") {
     # For raw: HadCRU/NOAA/NASA blocksize=2, Berk blocksize=4
-    if (model %in% c("NASA")) return(2L)
-    if (model %in% c("NOAA")) return(2L)
-    if (model %in% c("HadCRU")) return(2L)
-    if (model %in% c("Berkeley")) return(2L)
+    if (model %in% c("NASA")) return(4L)
+    if (model %in% c("NOAA")) return(4L)
+    if (model %in% c("HadCRU")) return(4L)
+    if (model %in% c("Berkeley")) return(4L)
   }
   stop("Unknown dataset/model: ", dataset, " / ", model)
 }
@@ -184,13 +185,13 @@ run_one_series <- function(Y, dates, block_size,
 
   # Candidate cps + refine
   candidate_cps_refined <- generate_candidate_change_points(
-    Y, X,p=p,
+    Y, X,p=p,q=0,
     method = "PELT",
     p_n = floor(2 * n^(2/5)),
     eta_n = eta_n
   )
 
-  R_MOPS <- refine(candidate_cps_refined, Location_e)
+  R_MOPS <- refine(candidate_cps_refined, Location_e, K, tau_star)
   Location_p <- sanitize_cps(R_MOPS$Location_p, n)
 
   # Fit trend with refined cps
@@ -285,7 +286,7 @@ raw_plots <- make_cp_plots(
   df_adj_yearly = df_adj_yearly,
   raw_models = raw_models,
   adj_models = adj_models,
-  eta_n = 9, alpha = 0.5, p = 1, LAG = 20
+  eta_n = 8, alpha = 0.5, p = 1, LAG = 20
 )
 
 adj_plots <- make_cp_plots(
@@ -294,7 +295,7 @@ adj_plots <- make_cp_plots(
   df_adj_yearly = df_adj_yearly,
   raw_models = raw_models,
   adj_models = adj_models,
-  eta_n = 9, alpha = 0.5, p = 1, LAG = 20
+  eta_n = 8, alpha = 0.5, p = 1, LAG = 20
 )
 
 gridExtra::grid.arrange(grobs = raw_plots, ncol = 2, top = "Raw Data - Four Models")

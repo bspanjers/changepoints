@@ -11,7 +11,7 @@ tau_star <- c(1930, 1980) # dummy for refine() to run; not used in our evaluatio
 # load adj yearly data
 file_adj_yearly = './data/temperature_anomalies_adj.RData'
 load(file_adj_yearly)
-df_adj_yearly <- subset(Tanom_annual_df, Year >= 1880)
+df_adj_yearly <- subset(Tanom_annual_df, Year >= 1881)
 names(df_adj_yearly)[1] <- "t"
 Y_adj_yearly <- df_adj_yearly$NOAA.adj
 dates_adj_yearly = df_adj_yearly$t
@@ -22,10 +22,11 @@ dates_adj_yearly = df_adj_yearly$t
 #noaa 24: 1.26 25: 1.14
 #hadcrut 24: 1.17 25: 1.05
 #Berkeley 24: 1.29 25: 1.19
+
 # load raw yearly data
 file_raw_yearly = './data/temperature_anomalies.RData'
 load(file_raw_yearly)
-df_raw_yearly <- subset(Tanom_annual_df, t >= 1880 & t < 2025)
+df_raw_yearly <- subset(Tanom_annual_df, t >= 1880 & t <= 2025)
 names(df_raw_yearly)[1] <- "t"
 Y_raw_yearly <- df_raw_yearly$HadCRUT
 dates_raw_yearly = df_raw_yearly$t
@@ -62,11 +63,11 @@ Location_e <- result_moment$change_points # detected change-points from moment k
 fittrend_e = fit.trendARp(Y,Location_e,p=p,plot=T,add.ar=F,fit=T,
                             dates=dates)#
 K <- length(Location_e)
-candidate_cps_refined <- generate_candidate_change_points(Y, X, p=p,method = "PELT", 
+candidate_cps_refined <- generate_candidate_change_points(Y, X, p=p,q=0,method = "PELT", 
                                                    p_n = floor(2 * n^(2/5)), eta_n = eta_n) # A(Z)
 
 
-R_MOPS <- refine(candidate_cps_refined, Location_e)
+R_MOPS <- refine(candidate_cps_refined, Location_e, K, tau_star) # Refine to get R-MOPS change-points T(Z) and informative points A(Z)
 Location_p <- R_MOPS$Location_p #Refined MOPS change-point Location T(Z)
 
 fittrend_p = fit.trendARp(Y, Location_p, p=p,plot=T,add.ar=F,fit=T,
@@ -133,18 +134,16 @@ format_p <- function(p) {
 # block sizes you specified
 get_block_size <- function(dataset, model) {
   if (dataset == "adj") {
-    # For adj: NASA/NOAA blocksize=3/4, Berk/HadCRU blocksize=2
-    if (model %in% c("NASA")) return(2L)
-    if (model %in% c("NOAA")) return(2L)
-    if (model %in% c("HadCRU")) return(2L)
-    if (model %in% c("Berkeley")) return(2L)
+    if (model %in% c("NASA")) return(4L)
+    if (model %in% c("NOAA")) return(4L)
+    if (model %in% c("HadCRU")) return(4L)
+    if (model %in% c("Berkeley")) return(4L)
   }
   if (dataset == "raw") {
-    # For raw: HadCRU/NOAA/NASA blocksize=2, Berk blocksize=4
-    if (model %in% c("NASA")) return(2L)
-    if (model %in% c("NOAA")) return(2L)
-    if (model %in% c("HadCRU")) return(2L)
-    if (model %in% c("Berkeley")) return(2L)
+    if (model %in% c("NASA")) return(4L)
+    if (model %in% c("NOAA")) return(4L)
+    if (model %in% c("HadCRU")) return(4L)
+    if (model %in% c("Berkeley")) return(4L)
   }
   stop("Unknown dataset/model: ", dataset, " / ", model)
 }
@@ -184,13 +183,13 @@ run_one_series <- function(Y, dates, block_size,
 
   # Candidate cps + refine
   candidate_cps_refined <- generate_candidate_change_points(
-    Y, X,p=p,
+    Y, X,p=p,q=0,
     method = "PELT",
     p_n = floor(2 * n^(2/5)),
     eta_n = eta_n
   )
 
-  R_MOPS <- refine(candidate_cps_refined, Location_e)
+  R_MOPS <- refine(candidate_cps_refined, Location_e, K, tau_star)
   Location_p <- sanitize_cps(R_MOPS$Location_p, n)
 
   # Fit trend with refined cps
@@ -224,36 +223,59 @@ run_one_series <- function(Y, dates, block_size,
 # -------------------------
 # Plot builder (raw or adj)
 # -------------------------
-make_cp_plots <- function(dataset = c("raw", "adj"),
-                          df_raw_yearly, df_adj_yearly,
-                          raw_models, adj_models,
-                          eta_n = 9, alpha = 0.5, p = 1, LAG = 20) {
-
-  dataset <- match.arg(dataset)
-
-  if (dataset == "raw") {
-    models <- raw_models
-    dates_all <- df_raw_yearly$t
-  } else {
-    models <- adj_models
-    dates_all <- df_adj_yearly$t
+run_all_with_global_adjustment <- function(df_raw_yearly, df_adj_yearly,
+                                            raw_models, adj_models,
+                                            eta_n = 9, alpha = 0.5, p = 1, LAG = 20) {
+  
+  # Run all 8 models
+  all_results <- list()
+  
+  for (dataset in c("raw", "adj")) {
+    if (dataset == "raw") {
+      models <- raw_models
+      dates_all <- df_raw_yearly$t
+    } else {
+      models <- adj_models
+      dates_all <- df_adj_yearly$t
+    }
+    
+    for (model in names(models)) {
+      Y <- models[[model]]
+      bs <- get_block_size(dataset, model)
+      
+      res <- run_one_series(
+        Y = Y, dates = dates_all, block_size = bs,
+        eta_n = eta_n, alpha = alpha, p = p, LAG = LAG, plot_fit = FALSE
+      )
+      
+      all_results[[paste0(dataset, "_", model)]] <- list(
+        res = res, model = model, bs = bs, dataset = dataset
+      )
+    }
   }
+  
+  # Collect and adjust p-values globally (all 8 tests)
+  lb_pvals_raw <- sapply(all_results, function(x) x$res$lb_pval)
+  norm_pvals_raw <- sapply(all_results, function(x) x$res$normality_pval)
+  
+  lb_pvals_adj <- p.adjust(lb_pvals_raw, method = "holm")
+  norm_pvals_adj <- p.adjust(norm_pvals_raw, method = "holm")
+  
+  # Add adjusted p-values to results
+  for (i in seq_along(all_results)) {
+    all_results[[i]]$lb_pval_adj <- lb_pvals_adj[i]
+    all_results[[i]]$norm_pval_adj <- norm_pvals_adj[i]
+  }
+  
+  all_results
+}
 
-  plots <- lapply(names(models), function(model) {
-    Y <- models[[model]]
-    bs <- get_block_size(dataset, model)
-
-    res <- run_one_series(
-      Y = Y,
-      dates = dates_all,
-      block_size = bs,
-      eta_n = eta_n,
-      alpha = alpha,
-      p = p,
-      LAG = LAG,
-      plot_fit = FALSE
-    )
-
+# Build plots from global results
+make_plots_from_results <- function(all_results, dataset) {
+  subset_results <- all_results[grepl(paste0("^", dataset, "_"), names(all_results))]
+  
+  lapply(subset_results, function(r) {
+    res <- r$res
     ggplot() +
       geom_line(aes(x = res$dates, y = res$Y), color = "blue") +
       geom_line(aes(x = res$dates, y = res$fittrend_p$fit_trend), color = "red") +
@@ -262,40 +284,26 @@ make_cp_plots <- function(dataset = c("raw", "adj"),
         else NULL } +
       labs(
         title = paste0(
-          toupper(dataset), " - ", model,
-          " (block=", bs,
-          ", Ljung Box p-value=", format_p(res$lb_pval),
-          ", Shapiro p-value=", format_p(res$normality_pval), ")"
+          toupper(r$dataset), " - ", r$model,
+          " (block=", r$bs,
+          ", LB p=", format_p(r$lb_pval_adj),
+          ", Shapiro p=", format_p(r$norm_pval_adj), ")"
         ),
         x = "Year",
         y = "Temperature Anomaly"
       ) +
       theme_minimal()
   })
-
-  plots
 }
 
-# -------------------------
-# Build + arrange grids
-# -------------------------
-raw_plots <- make_cp_plots(
-  dataset = "raw",
-  df_raw_yearly = df_raw_yearly,
-  df_adj_yearly = df_adj_yearly,
-  raw_models = raw_models,
-  adj_models = adj_models,
-  eta_n = 9, alpha = 0.5, p = 1, LAG = 20
+# Usage:
+all_results <- run_all_with_global_adjustment(
+  df_raw_yearly, df_adj_yearly, raw_models, adj_models,
+  eta_n = 8, alpha = 0.5, p = 1, LAG = 20
 )
 
-adj_plots <- make_cp_plots(
-  dataset = "adj",
-  df_raw_yearly = df_raw_yearly,
-  df_adj_yearly = df_adj_yearly,
-  raw_models = raw_models,
-  adj_models = adj_models,
-  eta_n = 9, alpha = 0.5, p = 1, LAG = 20
-)
+raw_plots <- make_plots_from_results(all_results, "raw")
+adj_plots <- make_plots_from_results(all_results, "adj")
 
 gridExtra::grid.arrange(grobs = raw_plots, ncol = 2, top = "Raw Data - Four Models")
 gridExtra::grid.arrange(grobs = adj_plots, ncol = 2, top = "Adjusted Data - Four Models")
