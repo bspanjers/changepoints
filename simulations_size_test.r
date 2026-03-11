@@ -5,7 +5,7 @@ library(changepoint) # for changepoint detection
 library(parallel)
 
 # load data
-load('temperature_anomalies.RData')
+load('./data/temperature_anomalies.RData')
 # use Tanom_annual_df, matrix, 6 columns, first year
 # at the time of analysis, the Japan Met dataset had not been updated and is not included in the paper
 
