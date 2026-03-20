@@ -26,7 +26,7 @@ dates_adj_yearly = df_adj_yearly$t
 # load raw yearly data
 file_raw_yearly = './data/temperature_anomalies.RData'
 load(file_raw_yearly)
-df_raw_yearly <- subset(Tanom_annual_df, t >= 1880 & t < 2025)
+df_raw_yearly <- subset(Tanom_annual_df, t >= 1880 & t <= 2025)
 names(df_raw_yearly)[1] <- "t"
 Y_raw_yearly <- df_raw_yearly$HadCRUT
 dates_raw_yearly = df_raw_yearly$t
