@@ -107,7 +107,7 @@ gettmax <- function(n, interc, slope, sd, phi, n_sim) {
 # Parallel processing
 ns <- 33:71
 n_sim <- 100000
-n_cores <- detectCores() - 1
+n_cores <- 39#detectCores() - 1
 cat(sprintf("Using %d cores\n", n_cores))
 
 # Register parallel backend
