@@ -127,6 +127,15 @@ results <- foreach(task_idx = 1:nrow(tasks), .packages = c("stats"), .errorhandl
   n_val <- task$n
   setting_row <- settings[setting_id, ]
   
+  # Save file for this task
+  save_file <- sprintf("./Results/TmaxquantHad_setting%d_n%d.Rdata", setting_id, n_val)
+  
+  # Skip if already completed
+  if (file.exists(save_file)) {
+    cat(sprintf("Setting %d, n=%d already completed. Skipping...\n", setting_id, n_val))
+    return("skipped")
+  }
+  
   # Run the simulation
   QN <- tryCatch({
     gettmax(n = n_val, interc = setting_row$intercept, slope = setting_row$slope, sd = setting_row$sd, phi = setting_row$phi, n_sim = n_sim)
@@ -135,7 +144,12 @@ results <- foreach(task_idx = 1:nrow(tasks), .packages = c("stats"), .errorhandl
     NA_real_
   })
   
-  list(setting_id = setting_id, n = n_val, QN = QN)
+  # Save result to disk immediately
+  save(QN, file = save_file)
+  cat(sprintf("Saved result for setting %d, n=%d: %.6f\n", setting_id, n_val, QN))
+  
+  # Return only a simple status indicator, not the full result
+  "completed"
 }
 
 # Stop cluster
@@ -143,15 +157,26 @@ stopCluster(cl)
 
 # Aggregate results per setting
 for (setting_id in 1:nrow(settings)) {
-  setting_results <- do.call(rbind, lapply(results, function(res) {
-    if (res$setting_id == setting_id) {
-      data.frame(n = res$n, QN = res$QN)
-    }
-  }))
+  setting_files <- list.files("./Results", 
+                              pattern = sprintf("TmaxquantHad_setting%d_n[0-9]+\\.Rdata", setting_id),
+                              full.names = TRUE)
   
-  # Save results for the setting
-  save(setting_results, file = sprintf("./Results/TmaxquantHad_setting%d.Rdata", setting_id))
-  cat(sprintf("Saved results for setting %d\n", setting_id))
+  if (length(setting_files) > 0) {
+    setting_results_list <- lapply(setting_files, function(file) {
+      env <- new.env()
+      load(file, envir = env)
+      QN <- env$QN
+      n_val <- as.numeric(gsub(".*_n([0-9]+)\\.Rdata", "\\1", file))
+      data.frame(n = n_val, QN = QN)
+    })
+    
+    setting_results <- do.call(rbind, setting_results_list)
+    setting_results <- setting_results[order(setting_results$n), ]
+    
+    # Save aggregated results for the setting
+    save(setting_results, file = sprintf("./Results/TmaxquantHad_setting%d.Rdata", setting_id))
+    cat(sprintf("Saved aggregated results for setting %d\n", setting_id))
+  }
 }
 
 cat("All tasks completed!\n")
