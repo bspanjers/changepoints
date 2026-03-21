@@ -159,7 +159,7 @@ gettmax=function(n,interc=-0.0662,slope=.019,sd=.09,phi=0.178, n_sim=100000){
 
 
 ns <- 33:71
-n_sim <- 100000
+n_sim <- 2
 # Number of cores to use
 n_cores <- detectCores() - 1
 cat(sprintf("Using %d cores\n", n_cores))
