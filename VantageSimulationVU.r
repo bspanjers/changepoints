@@ -104,6 +104,23 @@ gettmax <- function(n, interc, slope, sd, phi, n_sim) {
   return(quantile(hold, 0.95))
 }
 
+gettmax_chunked <- function(n, interc, slope, sd, phi, n_sim, chunk_size = 1000) {
+  n_chunks <- ceiling(n_sim / chunk_size)
+  hold <- numeric(n_sim)
+  pos <- 1
+
+  for (k in seq_len(n_chunks)) {
+    m <- min(chunk_size, n_sim - pos + 1)
+    hold[pos:(pos + m - 1)] <- replicate(
+      m,
+      simulateone(n = n, interc = interc, slope = slope, sd = sd, phi = phi)
+    )
+    pos <- pos + m
+  }
+
+  quantile(hold, 0.95)
+}
+
 # Parallel processing
 ns <- 33:71
 n_sim <- 100000
@@ -137,13 +154,15 @@ results <- foreach(task_idx = 1:nrow(tasks), .packages = c("stats"), .errorhandl
   }
   
   # Run the simulation
-  QN <- tryCatch({
-    gettmax(n = n_val, interc = setting_row$intercept, slope = setting_row$slope, sd = setting_row$sd, phi = setting_row$phi, n_sim = n_sim)
-  }, error = function(e) {
-    cat(sprintf("Error for setting %d, n=%d: %s\n", setting_id, n_val, e$message))
-    NA_real_
-  })
-  
+  QN <- gettmax_chunked(
+    n = n_val,
+    interc = setting_row$intercept,
+    slope = setting_row$slope,
+    sd = setting_row$sd,
+    phi = setting_row$phi,
+    n_sim = n_sim,
+    chunk_size = 1000
+  )
   # Save result to disk immediately
   save(QN, file = save_file)
   cat(sprintf("Saved result for setting %d, n=%d: %.6f\n", setting_id, n_val, QN))
