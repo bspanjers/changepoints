@@ -78,24 +78,44 @@ settings$sd <- pmax(settings$sd, 0.01)
 
 # Define the simulation function
 simulateone <- function(index = 1, n, interc, slope, sd, phi) {
-  seg <- 1:n
-  y <- interc + slope * seg + arima.sim(n = n, sd = sd, model = list(ar = phi))
-  min_len <- max(round(0.1 * n), 2)
-  max_len <- min(n - round(0.1 * n), n - 2)
-  seglen <- max_len:min_len
-  stats <- numeric(length(seglen))
-  
-  for (i in seq_along(seglen)) {
-    seg2 <- (n - seglen[i] + 1):n
-    seg1 <- 1:(n - seglen[i])
-    X <- cbind(rep(1, n), c(seg1, rep(seg1[length(seg1)], seglen[i])), c(rep(0, (n - seglen[i])), seg2 - seg2[1] + 1))
-    vec <- c(0, 0, -1, 1)
-    armafit <- arima(y, xreg = X, order = c(1, 0, 0), include.mean = FALSE)
-    sddiff <- sqrt(t(vec) %*% armafit$var.coef %*% vec)
-    stats[i] <- (armafit$coef[3] - armafit$coef[4]) / sddiff
-  }
-  
-  return(max(abs(stats)))
+  tryCatch({
+    seg <- 1:n
+    y <- interc + slope * seg + arima.sim(n = n, sd = sd, model = list(ar = phi))
+    min_len <- max(round(0.1 * n), 2)
+    max_len <- min(n - round(0.1 * n), n - 2)
+    seglen <- max_len:min_len
+    stats <- numeric(length(seglen))
+    
+    for (i in seq_along(seglen)) {
+      seg2 <- (n - seglen[i] + 1):n
+      seg1 <- 1:(n - seglen[i])
+      X <- cbind(
+        rep(1, n),
+        c(seg1, rep(seg1[length(seg1)], seglen[i])),
+        c(rep(0, (n - seglen[i])), seg2 - seg2[1] + 1)
+      )
+      vec <- c(0, 0, -1, 1)
+
+      armafit <- tryCatch({
+        arima(y, xreg = X, order = c(1, 0, 0), include.mean = FALSE)
+      }, error = function(e) {
+        return(NULL)
+      })
+
+      if (is.null(armafit)) {
+        stats[i] <- NA
+        next
+      }
+
+      sddiff <- sqrt(t(vec) %*% armafit$var.coef %*% vec)
+      stats[i] <- (armafit$coef[3] - armafit$coef[4]) / sddiff
+    }
+
+    return(max(abs(stats), na.rm = TRUE))
+
+  }, error = function(e) {
+    return(NA_real_)
+  })
 }
 
 gettmax <- function(n, interc, slope, sd, phi, n_sim) {
@@ -128,7 +148,14 @@ n_cores <- 39#detectCores() - 1
 cat(sprintf("Using %d cores\n", n_cores))
 
 # Register parallel backend
-cl <- makeCluster(n_cores)
+Sys.setenv(
+  OMP_NUM_THREADS = "1",
+  OPENBLAS_NUM_THREADS = "1",
+  MKL_NUM_THREADS = "1",
+  BLIS_NUM_THREADS = "1",
+  VECLIB_MAXIMUM_THREADS = "1"
+)
+cl <- makeCluster(n_cores, outfile="")
 registerDoParallel(cl)
 
 # Export required functions and data to workers
