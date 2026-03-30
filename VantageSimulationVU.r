@@ -142,7 +142,7 @@ gettmax_chunked <- function(n, interc, slope, sd, phi, n_sim, chunk_size = 1000)
 }
 
 # Parallel processing
-ns <- 33:71
+ns <- 33:52#:71
 n_sim <- 100000
 n_cores <- 39#detectCores() - 1
 cat(sprintf("Using %d cores\n", n_cores))
@@ -162,7 +162,11 @@ registerDoParallel(cl)
 clusterExport(cl, c("simulateone", "gettmax", "settings", "ns"))
 
 # Create a task grid: all combinations of settings and ns
-tasks <- expand.grid(setting_id = 1:nrow(settings), n = ns)
+tasks <- expand.grid(setting_id = 1:nrow(settings), n = 33:71)
+tasks$save_file <- sprintf("./Results/TmaxquantHad_setting%d_n%d.Rdata",
+                           tasks$setting_id, tasks$n)
+
+tasks <- tasks[!file.exists(tasks$save_file), ]
 
 # Run all tasks in parallel
 results <- foreach(task_idx = 1:nrow(tasks), .packages = c("stats"), .errorhandling = "pass") %dopar% {
