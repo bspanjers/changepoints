@@ -59,7 +59,138 @@ PELT.trendARpJOIN=function(data,p=p,pen=0,minseglen=1,verbose=FALSE){
   }
   return(sort(fcpt)[-1])
 }
+fit.trendARpJOIN_with_se <- function(data, cpts, p, dates=NULL, plot=TRUE, fit=TRUE,
+                             add.ar=FALSE, title="Data", pred=FALSE){
+  library(forecast)
 
+  ## joined segment: no intercept; continuity enforced by previous level
+  trendARpsegfit <- function(data, start, prev_level, p, pred=FALSE){
+    n <- length(data)
+    t <- start:(start+n-1)
+    X <- (t - start+1) / n
+
+    filtered  <- data - prev_level + prev_level * X
+    trendfit  <- lm(filtered ~ -1 + X)
+    arfit     <- arima(resid(trendfit), order=c(p,0,0),
+                       include.mean=FALSE, method="ML")
+
+    if(!pred){
+      beta_per_year <- as.numeric(coef(trendfit)["X"])/n
+      se_beta_per_year <- summary(trendfit)$coefficients["X", "Std. Error"] / n
+      
+      # Extract AR coefficient SEs
+      ar_ses <- sqrt(diag(vcov(arfit)))
+      
+      fitted_trend  <- as.numeric(fitted(trendfit)) + prev_level - prev_level*X
+      return(list(
+        coef      = c(beta_per_year, coef(arfit)),
+        se_coef   = c(se_beta_per_year, ar_ses),
+        arfit     = as.numeric(fitted(arfit)),
+        trendfit  = fitted_trend
+      ))
+    }else{
+      fc <- predict(arfit)
+      fc$pred <- fc$pred + coef(trendfit)
+      return(fc)
+    }
+  }
+
+  ## first segment: free intercept; also return a "carry level" for the join
+  FIRSTtrendARpsegfit <- function(data, start, p){
+    n <- length(data)
+    t <- start:(start+n-1)
+    X <- (t - start+1) / n
+
+    trendfit <- lm(data ~ X)
+    arfit    <- arima(resid(trendfit), order=c(p,0,0),
+                      include.mean=FALSE, method="ML")
+
+    intercept      <- as.numeric(coef(trendfit)[1])
+    slope_segment  <- as.numeric(coef(trendfit)["X"])
+    carry_level    <- intercept + slope_segment
+    beta_per_year  <- slope_segment / n
+
+    # Extract SEs from regression
+    se_intercept <- summary(trendfit)$coefficients[1, "Std. Error"]
+    se_slope_segment <- summary(trendfit)$coefficients["X", "Std. Error"]
+    se_beta_per_year <- se_slope_segment / n
+    
+    # Extract AR coefficient SEs
+    ar_ses <- sqrt(diag(vcov(arfit)))
+
+    return(list(
+      coef      = c(intercept, beta_per_year, coef(arfit)),
+      se_coef   = c(se_intercept, se_beta_per_year, ar_ses),
+      arfit     = as.numeric(fitted(arfit)),
+      trendfit  = as.numeric(fitted(trendfit))
+    ))
+  }
+
+  # ---- set up and fit all segments ----
+  cpts <- c(0, cpts, length(data))
+  nseg <- length(cpts) - 1
+
+  # coeffs: (CarryLevel, Beta_per_year, AR1..ARp)
+  coeffs <- matrix(NA_real_, nrow=nseg, ncol=2+p)
+  colnames(coeffs) <- c("CarryLevel", "Beta", paste0("AR", seq_len(p)))
+  
+  # se_coeffs: same structure as coeffs
+  se_coeffs <- matrix(NA_real_, nrow=nseg, ncol=2+p)
+  colnames(se_coeffs) <- c("SE_CarryLevel", "SE_Beta", paste0("SE_AR", seq_len(p)))
+
+  segments <- vector("list", nseg)
+
+  # first segment
+  segments[[1]] <- FIRSTtrendARpsegfit(data[(cpts[1]+1):cpts[2]], start=cpts[1], p=p)
+  coeffs[1, ]   <- segments[[1]]$coef
+  se_coeffs[1, ] <- segments[[1]]$se_coef
+
+  # pass the actual last fitted level to the next segment
+  prev_level <- tail(segments[[1]]$trendfit, 1)
+
+  if(nseg >= 2){
+    for(i in 2:nseg){
+      seg <- trendARpsegfit(data[(cpts[i]+1):cpts[i+1]],
+                            start=cpts[i],
+                            prev_level=prev_level,
+                            p=p,
+                            pred=FALSE)
+      segments[[i]] <- seg
+      # pad to (2+p): NA carry level (not used for joined), then beta + ARs
+      coeffs[i, ] <- c(NA_real_, seg$coef)
+      se_coeffs[i, ] <- c(NA_real_, seg$se_coef)
+      prev_level  <- tail(seg$trendfit, 1)
+    }
+  }
+
+  # ---- assemble fitted trend ----
+  fit_vec <- unlist(lapply(segments, function(x) x$trendfit))
+  if(add.ar){
+    fit_vec <- fit_vec + unlist(lapply(segments, function(x) x$arfit))
+  }
+
+  # ---- optional save/plot ----
+  if(fit){
+    if(length(fit_vec) > 55){
+      save(dates, fit_vec, data, file=paste0(title,"_TrendAR",p,"JOIN_fit",".RData"))
+    } else {
+      save(dates, fit_vec, data, file=paste0(title,"_TrendAR",p,"JOINshort_fit",".RData"))
+    }
+  }
+
+  if(plot){
+    if(!is.null(dates)){
+      if(length(dates)!=length(data)) stop("Length of dates and data must be the same")
+      plot(dates, data, type='l', main=title, xlab="Year", ylab="Anomaly (°C)")
+      lines(dates, fit_vec, col='blue')
+    } else {
+      ts.plot(data, main=title)
+      lines(seq_along(data), fit_vec, col='blue')
+    }
+  }
+
+  return(list(dates=dates, fit=fit_vec, coeffs=coeffs, se_coeffs=se_coeffs))
+}
 # ---------------- FIT with continuity (match FIXARp logic) ----------------
 fit.trendARpJOIN <- function(data, cpts, p, dates=NULL, plot=TRUE, fit=TRUE,
                              add.ar=FALSE, title="Data", pred=FALSE){
