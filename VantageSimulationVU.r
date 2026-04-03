@@ -142,9 +142,9 @@ gettmax_chunked <- function(n, interc, slope, sd, phi, n_sim, chunk_size = 1000)
 }
 
 # Parallel processing
-ns <- 33:52#:71
+ns <- 53:71#33:71
 n_sim <- 100000
-n_cores <- 39#detectCores() - 1
+n_cores <- 100#detectCores() - 1
 cat(sprintf("Using %d cores\n", n_cores))
 
 # Register parallel backend
