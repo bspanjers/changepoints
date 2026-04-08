@@ -334,9 +334,9 @@ print(settings)
 
 
 # Parallel processing
-ns <- 33:71#33:71
-n_sim <- 7
-n_cores <- 7#detectCores() - 1
+ns <- 53:71#33:71
+n_sim <- 100000
+n_cores <- 100#detectCores() - 1
 cat(sprintf("Using %d cores\n", n_cores))
 
 # Register parallel backend
@@ -354,7 +354,7 @@ registerDoParallel(cl)
 clusterExport(cl, c("simulateone", "gettmax", "settings", "ns"))
 
 # Create a task grid: all combinations of settings and ns
-tasks <- expand.grid(setting_id = 1:nrow(settings), n = 33:71)
+tasks <- expand.grid(setting_id = 1:nrow(settings), n = ns)
 tasks$save_file <- sprintf("./Results/TmaxquantHad_setting%d_n%d.Rdata",
                            tasks$setting_id, tasks$n)
 
