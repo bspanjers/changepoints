@@ -262,12 +262,12 @@ for (i in 1:5) {
 seed <- 12345
 ysetting1 = y_full
 set.seed(seed) # for reproducibility
-ysetting2 = simulate_trendARpJOIN(numeric(n), fittrend2, 121)
-ysetting3 = simulate_trendARpJOIN(numeric(n), fittrend3, 121)
-ysetting4 = simulate_trendARpJOIN(numeric(n), fittrend4, 121)
-ysetting5 = simulate_trendARpJOIN(numeric(n), fittrend5, 121)
+ysetting2 = simulate_trendARpJOIN(numeric(n), fittrend2, 124) #change point is set at tau_star = 124 (1973)
+ysetting3 = simulate_trendARpJOIN(numeric(n), fittrend3, 124)
+ysetting4 = simulate_trendARpJOIN(numeric(n), fittrend4, 124)
+ysetting5 = simulate_trendARpJOIN(numeric(n), fittrend5, 124)
 
-y1_after_1970 = ysetting1[121:length(ysetting1)]
+y1_after_1970 = ysetting1[121:length(ysetting1)] # beaulieu fix change point at 1970 (index 121)
 y2_after_1970 = ysetting2[121:length(ysetting2)]
 y3_after_1970 = ysetting3[121:length(ysetting3)]
 y4_after_1970 = ysetting4[121:length(ysetting4)]
@@ -334,7 +334,7 @@ print(settings)
 
 
 # Parallel processing
-ns <- 53:71#33:71
+ns <- 33:52#53:71#33:71
 n_sim <- 100000
 n_cores <- 100#detectCores() - 1
 cat(sprintf("Using %d cores\n", n_cores))

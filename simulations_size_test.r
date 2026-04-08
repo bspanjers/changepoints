@@ -48,7 +48,7 @@ print(fittrend$coeffs)
 simu = simulate_trendARpJOIN(y, fittrendAR, itrendarjoin)
 
 #Model fit
-itrendarjoin_simu =PELT.trendARpJOIN(simu, p=1,pen=4*log(n),minseglen=10)
+itrendarjoin_simu = PELT.trendARpJOIN(simu, p=1,pen=4*log(n),minseglen=10)
 fittrend_simu = fit.trendARpJOIN(simu, itrendarjoin_simu,p=1,dates=years,plot=T,add.ar=F,fit=T,
                             title=names(Tanom_annual_df[4]),pred=F)# get fit without AR - to visualize trend segments
 fits = fittrend_simu$fit
