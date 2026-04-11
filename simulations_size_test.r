@@ -96,6 +96,8 @@ cat("End of segment 1=",simu[121:174][n-seglen[i]] ,"\n")
 nsim <- 2000
 threshold <- 3.146627   # TMAX threshold recalculated for 1973
 count_exceed <- 0  # counter
+seed_true_cp <- 12345
+set.seed(seed_true_cp)
 
 for(rep in 1:nsim){
 
@@ -161,11 +163,13 @@ nsim       <- 20000
 refyear    <- 1973
 lag_thresh <- 15
 penalty    <- 4 * log(n)
+seed_bootstrap <- 12345
 
 ### --- SETUP PARALLEL BACKEND --- ###
 n_cores <- detectCores() - 1  # leave one core free
 cl <- makeCluster(n_cores)
 registerDoParallel(cl)
+clusterSetRNGStream(cl, iseed = seed_bootstrap)
 
 # Export necessary objects to workers
 clusterExport(cl, c("y", "fittrendAR", "itrendarjoin", "years", "QNs", 
@@ -412,6 +416,7 @@ run_bootstrap_for_setting <- function(setting_id, nsim, refyear, lag_thresh, pen
   n_cores <- detectCores() - 1
   cl <- makeCluster(n_cores)
   registerDoParallel(cl)
+  clusterSetRNGStream(cl, iseed = 10000 + setting_id)
   
   # Export necessary objects to workers
   clusterExport(cl, c("y_setting", "fittrend_setting", "tau_star", "years", "QNs", 

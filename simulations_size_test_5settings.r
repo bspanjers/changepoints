@@ -223,6 +223,7 @@ refyear    <- 1973
 lag_thresh <- 15
 tau_star   <- 124  # Index for 1973 (changepoint location)
 penalty    <- 4 * log(n)
+seed_bootstrap <- 12345
 
 ### --- SINGLE SIMULATION FUNCTION --- ###
 run_one_sim <- function(i, y_setting, fittrend_setting, tau_star, years, QNs, penalty, refyear, lag_thresh) {
@@ -290,7 +291,7 @@ if (is.null(bp) || length(bp) == 0) return(list(status = "zero", bp = NA, year =
 }
 
 ### --- RUN BOOTSTRAP FOR ONE SETTING --- ###
-run_bootstrap_for_setting <- function(setting_id, nsim, refyear, lag_thresh, penalty, tau_star, years, n) {
+run_bootstrap_for_setting <- function(setting_id, nsim, refyear, lag_thresh, penalty, tau_star, years, n, seed_bootstrap) {
   
   cat("\n##############################################\n")
   cat(sprintf("  Running bootstrap for Setting %d\n", setting_id))
@@ -316,6 +317,7 @@ run_bootstrap_for_setting <- function(setting_id, nsim, refyear, lag_thresh, pen
   n_cores <- detectCores() - 1
   cl <- makeCluster(n_cores)
   registerDoParallel(cl)
+  clusterSetRNGStream(cl, iseed = seed_bootstrap + setting_id)
   
   # Export necessary objects to workers
   clusterExport(cl, c("y_setting", "fittrend_setting", "tau_star", "years", "QNs", 
@@ -470,7 +472,8 @@ for (setting_id in 1:5) {
     penalty = penalty,
     tau_star = tau_star,
     years = years,
-    n = n
+    n = n,
+    seed_bootstrap = seed_bootstrap
   )
   
   all_results[[setting_id]] <- result
