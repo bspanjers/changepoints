@@ -44,47 +44,6 @@ print(fittrend$coeffs)
 
 
 
-#simulate path
-simu = simulate_trendARpJOIN(y, fittrendAR, itrendarjoin)
-
-#Model fit
-itrendarjoin_simu = PELT.trendARpJOIN(simu, p=1,pen=4*log(n),minseglen=10)
-fittrend_simu = fit.trendARpJOIN(simu, itrendarjoin_simu,p=1,dates=years,plot=T,add.ar=F,fit=T,
-                            title=names(Tanom_annual_df[4]),pred=F)# get fit without AR - to visualize trend segments
-fits = fittrend_simu$fit
-dates = fittrend_simu$dates
-fittrendAR_simu = fit.trendARpJOIN(simu,itrendarjoin_simu,p=1,dates=years,plot=F,add.ar=T,fit=T,
-                            title=names(Tanom_annual_df[4])) #get fit with AR - to compute residuals below
-yeartrendarjoin=years[itrendarjoin_simu]  # put cpts in terms of year
-cat(paste(names(Tanom_annual_df),':TrendAR1join \n'))
-print(fittrend_simu$coeffs)
-
-
-simu = simulate_trendARpJOIN(y, fittrendAR, itrendarjoin)
-
-
-yafterbreak=simu[121: length(simu)]
-n=length(yafterbreak)
-seg=1:n
-min=max(round(.1*n),2)
-max=min(n-round(.1*n),n-2)
-seglen=max:min
-stats=seglen
-sddiff=stats
-for(i in 1:length(seglen)){
-  seg2=(n-seglen[i]+1):n
-  seg1=1:(n-seglen[i])
-  X=cbind(rep(1,n),c(seg1,rep(seg1[length(seg1)],seglen[i])),c(rep(0,(n-seglen[i])),seg2-seg2[1]+1))
-  vec=c(0,0,-1,1)
-  armafit=arima(yafterbreak,xreg=X,order=c(1,0,0),include.mean=FALSE)
-  sddiff=sqrt(t(vec)%*%armafit$var.coef%*%vec)
-  stats[i]=(armafit$coef[3]-armafit$coef[4])/sddiff
-}
-#TMAX for 1970-2023
-cat((max(abs(stats))),"\n")	
-i=order(abs(stats),decreasing=TRUE)[1] 
-cat("End of segment 1=",simu[121:174][n-seglen[i]] ,"\n")
-
 
 
 # 1. true changepoint (e.g. 1973)
@@ -155,8 +114,9 @@ library(doParallel)
 library(progress)
 
 ### --- Load quantile table used for thresholding --- ###
-load("./Results/TmaxquantHad_combined.Rdata")
-QNs <- merged
+load("./Results/TmaxquantHad_setting1.Rdata")
+names(setting_results) <- c("ns", "QNs")
+QNs <- setting_results
 
 ### --- PARAMETERS --- ###
 nsim       <- 20000
@@ -315,7 +275,6 @@ library(doParallel)
 library(parallel)
 
 source('./MethodCode/PELTtrendARpJOIN.R')
-source('./VantageSimulationVU.R')  # This loads fittrend1-5, settings, years, n, etc.
 
 ### --- PARAMETERS --- ###
 nsim       <- 20000

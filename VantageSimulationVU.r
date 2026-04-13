@@ -334,7 +334,7 @@ print(settings)
 
 
 # Parallel processing
-ns <- 53:71#33:71
+ns <- 33:52 #53:71#33:71
 n_sim <- 100000
 n_cores <- 100#detectCores() - 1
 cat(sprintf("Using %d cores\n", n_cores))
