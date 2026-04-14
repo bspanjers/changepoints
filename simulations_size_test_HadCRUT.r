@@ -1,6 +1,7 @@
 
 library(WeightedPortTest) # for the portmanteau test
 library(parallel)
+library(pbapply)
 
 library(foreach)
 library(doParallel)
@@ -25,7 +26,7 @@ source('./MethodCode/PELTtrendARpJOIN.R')
 trendarjoin=list()
 mresiduals=list()
 
-setting = "NOAA"
+setting = "HadCRUT"
 
 if (setting == "HadCRUT") {
   col_index <- 4
@@ -49,6 +50,13 @@ itrendarjoin=PELT.trendARpJOIN(y, p=1,pen=4*log(n),minseglen=10)
 fittrend = fit.trendARpJOIN(y, itrendarjoin,p=1,dates=years,plot=F,add.ar=F,fit=T,
                             title=names(Tanom_annual_df[4]),pred=F)# get fit without AR - to visualize trend segments
 
+fits = fittrend$fit
+dates = fittrend$dates
+fittrendAR = fit.trendARpJOIN(y,itrendarjoin,p=1,dates=years,plot=F,add.ar=T,fit=T,
+                            title=names(Tanom_annual_df[4])) #get fit with AR - to compute residuals below
+yeartrendarjoin=years[itrendarjoin]  # put cpts in terms of year
+cat(paste(names(Tanom_annual_df),':TrendAR1join \n'))
+print(fittrend$coeffs)
 
 
 ### --- Load quantile table used for thresholding --- ###
@@ -64,7 +72,7 @@ penalty    <- 4 * log(n)
 seed_bootstrap <- 12345
 
 ### --- SETUP PARALLEL BACKEND --- ###
-n_cores <-40# detectCores() - 1  # leave one core free
+n_cores <- 120#detectCores() - 1  # leave one core free
 cl <- makeCluster(n_cores)
 registerDoParallel(cl)
 clusterSetRNGStream(cl, iseed = seed_bootstrap)
@@ -80,7 +88,7 @@ cat("Running", nsim, "simulations on", n_cores, "cores...\n")
 ### --- SINGLE SIMULATION FUNCTION --- ###
 run_one_sim <- function(i) {
   
-  simu <- simulate_trendARpJOIN(y, fittrend, itrendarjoin)
+  simu <- simulate_trendARpJOIN(y, fittrendAR, itrendarjoin)
   
   bp <- suppressWarnings(tryCatch(
     PELT.trendARpJOIN(simu, p=1, pen=penalty, minseglen=10),
@@ -131,8 +139,6 @@ run_one_sim <- function(i) {
 }
 
 ### --- RUN PARALLEL WITH PROGRESS --- ###
-# Use pbapply for progress bar with parallel
-library(pbapply)
 pboptions(type = "timer")  # shows ETA
 
 results_list <- pblapply(1:nsim, run_one_sim, cl = cl)

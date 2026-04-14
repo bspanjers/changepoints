@@ -31,7 +31,7 @@ n=nrow(data)
 
 #Model fit
 itrendarjoin=PELT.trendARpJOIN(y, p=1,pen=4*log(n),minseglen=10)
-fittrend = fit.trendARpJOIN(y, itrendarjoin,p=1,dates=years,plot=T,add.ar=F,fit=T,
+fittrend = fit.trendARpJOIN(y, itrendarjoin,p=1,dates=years,plot=F,add.ar=F,fit=T,
                             title=names(Tanom_annual_df[4]),pred=F)# get fit without AR - to visualize trend segments
 fits = fittrend$fit
 dates = fittrend$dates
@@ -93,7 +93,7 @@ for(rep in 1:nsim){
   ### ---- count exceedance ----
   if(Tmax > threshold) count_exceed <- count_exceed + 1
 }
-}
+
 
 ### ---- report result ----
 cat("\n----------------------------------------\n")
