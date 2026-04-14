@@ -1,7 +1,5 @@
 
 library(WeightedPortTest) # for the portmanteau test
-library(EnvCpt) # for changepoint detection
-library(changepoint) # for changepoint detection
 library(parallel)
 
 library(foreach)
@@ -27,7 +25,7 @@ source('./MethodCode/PELTtrendARpJOIN.R')
 trendarjoin=list()
 mresiduals=list()
 
-setting = "HadCRUT"
+setting = "NOAA"
 
 if (setting == "HadCRUT") {
   col_index <- 4
@@ -66,7 +64,7 @@ penalty    <- 4 * log(n)
 seed_bootstrap <- 12345
 
 ### --- SETUP PARALLEL BACKEND --- ###
-n_cores <- detectCores() - 1  # leave one core free
+n_cores <-40# detectCores() - 1  # leave one core free
 cl <- makeCluster(n_cores)
 registerDoParallel(cl)
 clusterSetRNGStream(cl, iseed = seed_bootstrap)

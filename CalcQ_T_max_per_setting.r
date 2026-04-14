@@ -98,7 +98,7 @@ gettmax_chunked <- function(n, interc, slope, sd, phi, n_sim, chunk_size = 1000)
 
 ns <- 33:71
 n_sim <- 100000
-n_cores <- 100 # detectCores() - 1
+n_cores <-39 # detectCores() - 1
 settings_to_run <- c("NOAA", "NASA", "HadCRUT", "Berkeley")
 
 for (setting in settings_to_run) {
