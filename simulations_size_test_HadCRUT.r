@@ -26,7 +26,7 @@ source('./MethodCode/PELTtrendARpJOIN.R')
 trendarjoin=list()
 mresiduals=list()
 
-setting = "HadCRUT"
+setting = "NOAA"
 
 if (setting == "HadCRUT") {
   col_index <- 4
@@ -66,19 +66,19 @@ QNs <- setting_results
 
 ### --- PARAMETERS --- ###
 nsim       <- 20000
-refyear    <- 1973
+refyear    <- years[itrendarjoin]
 lag_thresh <- 15
 penalty    <- 4 * log(n)
 seed_bootstrap <- 12345
 
 ### --- SETUP PARALLEL BACKEND --- ###
-n_cores <- 120#detectCores() - 1  # leave one core free
+n_cores <- 70#detectCores() - 1  # leave one core free
 cl <- makeCluster(n_cores)
 registerDoParallel(cl)
 clusterSetRNGStream(cl, iseed = seed_bootstrap)
 
 # Export necessary objects to workers
-clusterExport(cl, c("y", "fittrend", "itrendarjoin", "years", "QNs", 
+clusterExport(cl, c("y", "fittrendAR", "itrendarjoin", "years", "QNs", 
                     "penalty", "refyear", "lag_thresh",
                     "simulate_trendARpJOIN", "PELT.trendARpJOIN"))
 clusterEvalQ(cl, source('./MethodCode/PELTtrendARpJOIN.R'))
