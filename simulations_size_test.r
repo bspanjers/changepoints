@@ -1,8 +1,12 @@
 
 library(WeightedPortTest) # for the portmanteau test
-library(EnvCpt) # for changepoint detection
-library(changepoint) # for changepoint detection
 library(parallel)
+library(pbapply)
+
+library(foreach)
+library(doParallel)
+library(progress)
+
 
 # load data
 load('./data/temperature_anomalies.RData')
@@ -21,10 +25,22 @@ source('./MethodCode/PELTtrendARpJOIN.R')
 ########### Continuous model AR(1)
 trendarjoin=list()
 mresiduals=list()
-fits=list()
-dates=list()
 
-data=Tanom_annual_df[,c(1,4)][!is.na(Tanom_annual_df[,4]),]
+setting = "NASA"
+
+if (setting == "HadCRUT") {
+  col_index <- 4
+} else if (setting == "NASA") {
+  col_index <- 2
+} else if (setting == "NOAA") {
+  col_index <- 5
+} else if (setting == "Berkeley") {
+  col_index <- 6
+} else {
+  stop("Invalid setting specified.")
+}
+
+data=Tanom_annual_df[,c(1,col_index)][!is.na(Tanom_annual_df[,col_index]),]
 y = data[,2]
 years = data[,1]
 n=nrow(data)
@@ -33,6 +49,7 @@ n=nrow(data)
 itrendarjoin=PELT.trendARpJOIN(y, p=1,pen=4*log(n),minseglen=10)
 fittrend = fit.trendARpJOIN(y, itrendarjoin,p=1,dates=years,plot=F,add.ar=F,fit=T,
                             title=names(Tanom_annual_df[4]),pred=F)# get fit without AR - to visualize trend segments
+
 fits = fittrend$fit
 dates = fittrend$dates
 fittrendAR = fit.trendARpJOIN(y,itrendarjoin,p=1,dates=years,plot=F,add.ar=T,fit=T,
@@ -42,92 +59,20 @@ cat(paste(names(Tanom_annual_df),':TrendAR1join \n'))
 print(fittrend$coeffs)
 
 
-
-
-
-
-# 1. true changepoint (e.g. 1973)
-# 2. estimated changepoint (from PELT)
-# 3. fixed changepoint (1970)
-
-if (FALSE){
-########## "TRUE" CHANGEPOINT: 1973 #################
-nsim <- 2000
-threshold <- 3.146627   # TMAX threshold recalculated for 1973
-count_exceed <- 0  # counter
-seed_true_cp <- 12345
-set.seed(seed_true_cp)
-
-for(rep in 1:nsim){
-
-  ### ---- simulate from fitted model ----
-  simu <- simulate_trendARpJOIN(y, fittrendAR, itrendarjoin)
-
-  ### ---- extract part AFTER 1973 ----
-  yafterbreak <- simu[124:length(simu)]
-
-  n <- length(yafterbreak)
-  seg <- 1:n
-  min <- max(round(.1*n),2)
-  max <- min(n-round(.1*n),n-2)
-  seglen <- max:min
-  stats <- seglen
-
-  ### ---- compute TMAX ----
-  for(i in 1:length(seglen)){
-    seg2 <- (n-seglen[i]+1):n
-    seg1 <- 1:(n-seglen[i])
-
-    X <- cbind(rep(1,n),
-               c(seg1,rep(seg1[length(seg1)],seglen[i])),
-               c(rep(0,(n-seglen[i])),seg2-seg2[1]+1))
-
-    vec <- c(0,0,-1,1)
-    armafit <- arima(yafterbreak, xreg=X, order=c(1,0,0), include.mean=FALSE)
-    sddiff <- sqrt(t(vec) %*% armafit$var.coef %*% vec)
-    stats[i] <- (armafit$coef[3] - armafit$coef[4]) / sddiff
-  }
-
-  Tmax <- max(abs(stats))
-
-  ### ---- count exceedance ----
-  if(Tmax > threshold) count_exceed <- count_exceed + 1
-}
-
-
-### ---- report result ----
-cat("\n----------------------------------------\n")
-cat("Out of", nsim, "simulations:\n")
-cat("TMAX >", threshold, " occurred", count_exceed, "times.\n")
-cat("Estimated probability =", count_exceed/nsim, "\n")
-cat("----------------------------------------\n")
-
-
-
-# ...existing code...
-
-##############################################################################
-###               BOOTSTRAP SIZE TEST FOR JOIN MODEL (PARALLEL)            ###
-##############################################################################
-
-library(foreach)
-library(doParallel)
-library(progress)
-
 ### --- Load quantile table used for thresholding --- ###
-load("./Results/TmaxquantHadCRUT.Rdata")
+load(sprintf("./Results/Tmaxquant%s.Rdata", setting))
 names(setting_results) <- c("ns", "QNs")
 QNs <- setting_results
 
 ### --- PARAMETERS --- ###
 nsim       <- 20000
-refyear    <- 1973
+refyear    <- years[itrendarjoin]
 lag_thresh <- 15
 penalty    <- 4 * log(n)
 seed_bootstrap <- 12345
 
 ### --- SETUP PARALLEL BACKEND --- ###
-n_cores <- 120#detectCores() - 1  # leave one core free
+n_cores <- 7#detectCores() - 1  # leave one core free
 cl <- makeCluster(n_cores)
 registerDoParallel(cl)
 clusterSetRNGStream(cl, iseed = seed_bootstrap)
@@ -194,8 +139,6 @@ run_one_sim <- function(i) {
 }
 
 ### --- RUN PARALLEL WITH PROGRESS --- ###
-# Use pbapply for progress bar with parallel
-library(pbapply)
 pboptions(type = "timer")  # shows ETA
 
 results_list <- pblapply(1:nsim, run_one_sim, cl = cl)
@@ -246,7 +189,8 @@ results <- list(
   )
 )
 
-saveRDS(results, file = "./Results/simulation_results_size_test_HadCRUT.Rds")
+saveRDS(results, file = sprintf("./Results/simulation_results_size_test_%s.Rds", setting))
+
 
 cat("\n=========== SUMMARY ===========\n")
 cat("> PELT failed (error/warning):", count_pelt_fail, "\n")
@@ -257,9 +201,3 @@ cat("> Valid 1-break cases        :", length(valid_results), "\n")
 cat("================================\n")
 
 print(results$rejection_by_year)
-
-
-
-
-
-

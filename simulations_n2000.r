@@ -438,7 +438,7 @@ for (s2 in sigmas) {
     caption = "Simulation results ($S=1000$, RMOPS)",
     label   = paste0("tab:sim_rmops_sigma", gsub("\\.", "", sprintf("%.2f", s2)))
   )
-  outpath <- paste0("./sim_rmops_sigma", gsub("\\.", "", sprintf("%.2f", s2)), ".tex")
+  outpath <- paste0("./Results/sim_rmops_sigma", gsub("\\.", "", sprintf("%.2f", s2)), "_n2000.tex")
   writeLines(tex, outpath)
   message("✅ wrote ", outpath)
 }

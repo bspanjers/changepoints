@@ -347,7 +347,7 @@ generate_candidate_change_points <- function(Y, X, p=p, q=q, method = "WBS", p_n
     if (method == "PELT") {
       candidates = PELT.trendARp(Y, p=p, q=q, pen=0, minseglen=eta_n)
       if (length(candidates) > p_n) {
-        print("More candidates than p_n found.")
+        #print("More candidates than p_n found.")
       }
 
       return(candidates)

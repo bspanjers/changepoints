@@ -172,9 +172,9 @@ fit.trendARpJOIN_with_se <- function(data, cpts, p, dates=NULL, plot=TRUE, fit=T
   # ---- optional save/plot ----
   if(fit){
     if(length(fit_vec) > 55){
-      save(dates, fit_vec, data, file=paste0(title,"_TrendAR",p,"JOIN_fit",".RData"))
+      save(dates, fit_vec, data, file=paste0("./data/",title,"_TrendAR",p,"JOIN_fit",".RData"))
     } else {
-      save(dates, fit_vec, data, file=paste0(title,"_TrendAR",p,"JOINshort_fit",".RData"))
+      save(dates, fit_vec, data, file=paste0("./data/",title,"_TrendAR",p,"JOINshort_fit",".RData"))
     }
   }
 
